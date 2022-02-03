@@ -1,7 +1,7 @@
 #ifndef RNDLEARNERV3__HPP__
 #define RNDLEARNERV3__HPP__
 
-#include "RndLearner.hpp"
+#include "RndLearnerV2.hpp"
 
 #ifdef HAVE_ARMADILLO
 #include "DataLearner.hpp"
@@ -36,7 +36,6 @@ namespace ufo
 
     ExprSet checked;
     set<HornRuleExt*> propped;
-    map<int, ExprVector> candidates;
     map<int, deque<Expr>> deferredCandidates;
     map<int, ExprSet> allDataCands;
     map<int, ExprSet> tmpFailed;
@@ -64,6 +63,7 @@ namespace ufo
 
     protected:
 
+    map<int, ExprVector> candidates;
     map<int, vector<ArrAccessIter* >> qvits; // per cycle
     map<int, ExprSet> qvars;
 

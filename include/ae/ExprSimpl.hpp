@@ -250,6 +250,12 @@ namespace ufo
     return isOpX<MPZ>(e) || isOpX<MPQ>(e);
   }
 
+  inline static bool isValue(Expr a)
+  {
+    return (is_bvnum(a) || isNumericConst(a) ||
+         isOpX<TRUE>(a) || isOpX<FALSE>(a));
+  }
+
   inline static unsigned containsNum (Expr a, Expr b)
   {
     if (a == b) return 1;
@@ -1396,6 +1402,13 @@ namespace ufo
         if (isOpX<STORE>(exp->left()) && exp->right() == exp->left()->right())
         {
           return exp->left()->last();
+        }
+        else if (isOpX<STORE>(exp->left()))
+        {
+          Expr a = exp->right();
+          Expr b = exp->left()->right();
+          if (isValue(a) && isValue(b) && a != b)
+            return mk<SELECT>(exp->left()->left(), exp->right());
         }
         if (isOpX<STORE>(exp->left()) && // exp->right() != exp->left()->right() &&
             bind::typeOf(exp->left())->last() == mk<BOOL_TY> (exp->efac ()))

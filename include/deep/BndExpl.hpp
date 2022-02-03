@@ -210,7 +210,13 @@ namespace ufo
           res = u.isSat(ssa);
           if (res || indeterminate (res))
           {
-            if (debug) outs () << "\n";
+            if (debug)
+            {
+              outs () << "\ntrue";
+              for (auto & b : a)
+                outs () << " (" << b << ") -> " << ruleManager.chcs[b].dstRelation;
+              outs () << "\n";
+            }
             toBreak = true;
             break;
           }

@@ -592,6 +592,7 @@ namespace ufo
 
     void combineCHCs()
     {
+      return;
       for (int i = 0; i < chcs.size(); i++)
       {
         if (find(toEraseChcs.begin(), toEraseChcs.end(), i) != toEraseChcs.end())
@@ -1193,6 +1194,9 @@ namespace ufo
           }
         }
 
+        if (c.isInductive) enc_chc << "; inductive\n";
+        else if (c.isFact) enc_chc << "; fact\n";
+        else if (c.isQuery) enc_chc << "; query\n";
         enc_chc << "(assert ";
         u.print(mkQFla(mk<IMPL>(mk<AND>(src, c.body), dst), true), enc_chc);
         enc_chc << ")\n\n";
