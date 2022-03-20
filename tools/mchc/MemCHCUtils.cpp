@@ -69,6 +69,27 @@ int main (int argc, char ** argv)
   }
 
   int debug = getIntValue(OPT_DEBUG, 0, argc, argv);
-  process(string(argv[argc-1]), debug);
+
+  //get names
+  const string pref("; var_id: ");
+  map<int, string> var_ids;
+  ifstream fi;
+  string line;
+  fi.open(argv[argc-1]);
+  while(getline(fi, line))
+  {
+    int pos1 = line.find(pref, 0);
+    if (pos1 != string::npos)
+    {
+      pos1 += pref.length();
+      int pos2 = line.find("; ", 1);
+      auto str1 = line.substr(pos1, pos2 - pos1);
+      auto str2 = stoi(line.substr(pos2 + 2));
+      var_ids[str2] = str1;
+      if (debug) outs() << "comment parsed: `" << str1 << "` `" << str2 << "`\n";
+    }
+  }
+
+  process(string(argv[argc-1]), var_ids, debug);
   return 0;
 }

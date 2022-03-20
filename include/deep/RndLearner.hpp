@@ -447,7 +447,7 @@ namespace ufo
       for (int i = 0; i < ruleManager.invVars[invDecl].size(); i++)
       {
         Expr var = ruleManager.invVars[invDecl][i];
-        if (sf.addVar(var))
+        // if (sf.addVar(var))  // FIXME: 
         {
           invarVars[invNumber][i] = var;
           invarVarsShort[invNumber].push_back(var);

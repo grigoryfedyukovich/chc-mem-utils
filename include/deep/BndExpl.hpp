@@ -41,6 +41,7 @@ namespace ufo
       m_efac(r.m_efac), ruleManager(r), u(m_efac), extraLemmas(lms), debug(d) {}
 
     map<Expr, ExprSet> concrInvs;
+    set<vector<int>> unsat_prefs;
 
     void guessRandomTrace(vector<int>& trace)
     {
@@ -55,6 +56,30 @@ namespace ufo
         curRel = ruleManager.chcs[chcId].dstRelation;
         trace.push_back(chcId);
       }
+    }
+
+    bool already_unsat(vector<int>& t)
+    {
+      bool unsat = false;
+      for (auto u : unsat_prefs)
+      {
+        if (u.size() > t.size()) continue;
+        bool found = true;
+        for (int j = 0; j < u.size(); j ++)
+        {
+          if (u[j] != t[j])
+          {
+            found = false;
+            break;
+          }
+        }
+        if (found)
+        {
+          unsat = true;
+          break;
+        }
+      }
+      return unsat;
     }
 
     void getAllTraces (Expr src, Expr dst, int len, vector<int> trace, vector<vector<int>>& traces)
@@ -73,6 +98,7 @@ namespace ufo
       }
       else
       {
+        if (already_unsat(trace)) return;
         for (auto a : ruleManager.outgs[src])
         {
           vector<int> newtrace = trace;
@@ -206,8 +232,11 @@ namespace ufo
         bool toBreak = false;
         for (auto &a : traces)
         {
-          Expr ssa = toExpr(a);
-          res = u.isSat(ssa);
+          ExprVector ssa;
+          getSSA(a, ssa);
+          int sz;
+          res = u.isSatIncrem(ssa, sz);
+
           if (res || indeterminate (res))
           {
             if (debug)
@@ -219,6 +248,11 @@ namespace ufo
             }
             toBreak = true;
             break;
+          }
+          else
+          {
+            a.resize(sz);
+            unsat_prefs.insert(a);
           }
         }
         if (toBreak) break;

@@ -3,6 +3,7 @@
 
 #include <fstream>
 #include "ae/AeValSolver.hpp"
+#include "SetEncoding.hpp"
 
 using namespace std;
 using namespace boost;
@@ -14,6 +15,11 @@ namespace ufo
     ExprVector srcVars;
     ExprVector dstVars;
     ExprVector locVars;
+
+    ExprSet srcTmp;
+    ExprSet dstTmp;
+
+    ExprMap origSrcVars;
 
     Expr body;
 
@@ -31,6 +37,7 @@ namespace ufo
       {
         srcVars.push_back(invSrc[i]);
         lin.insert(mk<EQ>(src[i], srcVars[i]));
+        origSrcVars[srcVars[i]] = src[i];
       }
 
       for (int i = 0; i < dst.size(); i++)
@@ -75,6 +82,7 @@ namespace ufo
     set<int> chcsToCheck1, chcsToCheck2, toEraseChcs;
     int glob_ind = 0;
     ExprSet origVrs;
+    map<Expr, ExprMap> origSrcVars;
 
     CHCs(ExprFactory &efac, EZ3 &z3, int d = false) :
       u(efac), m_efac(efac), m_z3(z3), hasAnyArrays(false), debug(d) {};
@@ -89,30 +97,39 @@ namespace ufo
       return false;
     }
 
-    void splitBody (HornRuleExt& hr, ExprVector& srcVars, ExprSet& lin)
+    bool splitBody (HornRuleExt& hr, ExprVector& srcVars, ExprSet& lin)
     {
       getConj (simplifyBool(hr.body), lin);
       for (auto c = lin.begin(); c != lin.end(); )
       {
         Expr cnj = *c;
-        if (isOpX<FAPP>(cnj) && isOpX<FDECL>(cnj->left()) &&
-            find(decls.begin(), decls.end(), cnj->left()) != decls.end())
+        if (isOpX<FAPP>(cnj) && isOpX<FDECL>(cnj->left()))
         {
           Expr rel = cnj->left();
-          if (hr.srcRelation != NULL)
+          if (find(decls.begin(), decls.end(), rel) == decls.end())
           {
-            errs () << "Nonlinear CHC is currently unsupported: ["
-                    << *hr.srcRelation << " /\\ " << *rel->left() << " -> "
-                    << *hr.dstRelation << "]\n";
-            exit(1);
+            // uninterpreted pred with no def rules is found
+            // treat it FALSE
+            return false;
           }
-          hr.srcRelation = rel->left();
-          for (auto it = cnj->args_begin()+1; it != cnj->args_end(); ++it)
-            srcVars.push_back(*it);
-          c = lin.erase(c);
+          else
+          {
+            if (hr.srcRelation != NULL)
+            {
+              errs () << "Nonlinear CHC is currently unsupported: ["
+                      << *hr.srcRelation << " /\\ " << *rel->left() << " -> "
+                      << *hr.dstRelation << "]\n";
+              exit(1);
+            }
+            hr.srcRelation = rel->left();
+            for (auto it = cnj->args_begin()+1; it != cnj->args_end(); ++it)
+              srcVars.push_back(*it);
+            c = lin.erase(c);
+          }
         }
         else ++c;
       }
+      return true;
     }
 
     void addDecl (Expr a)
@@ -126,7 +143,7 @@ namespace ufo
           Expr arg = a->arg(i);
           if (!isOpX<INT_TY>(arg) && !isOpX<REAL_TY>(arg) &&
               !isOpX<BOOL_TY>(arg) && !isOpX<ARRAY_TY>(arg) &&
-              !isOpX<BVSORT> (arg))
+              !isOpX<BVSORT> (arg) && !isOpX<AD_TY>(arg))
           {
             errs() << "Argument #" << i << " of " << a << " is not supported\n";
             exit(1);
@@ -187,13 +204,24 @@ namespace ufo
         r = mk<IMPL>(r->right()->left(), r->left());
       }
 
+      // for now: hack
+      if (isOpX<IMPL>(r) && isOpX<ITE>(r->right()))
+      {
+        return true;
+      }
+
+      if (isOpX<IMPL>(r) && isOpX<IMPL>(r->right()))
+      {
+        r = mk<IMPL>(mk<AND>(r->left(), r->right()->left()), r->right()->right());
+      }
+
       if (isOpX<IMPL>(r) && !isFapp(r->right()) && !isOpX<FALSE>(r->right()))
       {
         if (isOpX<TRUE>(r->right()))
         {
           return false;
         }
-        r = mk<IMPL>(mk<AND>(r->left(), mk<NEG>(r->right())), mk<FALSE>(m_efac));
+        r = mk<IMPL>(mk<AND>(r->left(), mkNeg(r->right())), mk<FALSE>(m_efac));
       }
 
       if (!isOpX<IMPL>(r)) r = mk<IMPL>(mk<TRUE>(m_efac), r);
@@ -210,12 +238,28 @@ namespace ufo
       fp.loadFPfromFile(smt);
       chcs.reserve(fp.m_rules.size());
 
+      ExprMap eqs;
+      for (auto it = fp.m_rules.begin(); it != fp.m_rules.end(); )
+      {
+        if (isOpX<EQ>(*it))
+        {
+          eqs[(*it)->left()->left()] = (*it)->right()->left();
+          it = fp.m_rules.erase(it);
+        }
+        else ++it;
+      }
+
       for (auto &r: fp.m_rules)
       {
         hasAnyArrays |= containsOp<ARRAY_TY>(r);
         chcs.push_back(HornRuleExt());
         HornRuleExt& hr = chcs.back();
-
+        while (true)
+        {
+          auto r1 = replaceAll(r, eqs);
+          if (r == r1) break;
+          else r = r1;
+        }
         if (!normalize(r, hr))
         {
           chcs.pop_back();
@@ -223,7 +267,19 @@ namespace ufo
         }
 
         filter (r, bind::IsConst(), inserter (origVrs, origVrs.begin()));
-        hr.body = r;
+        // hack:
+        if (isOpX<ITE>(r->last()))
+        {
+          hr.body = mk<IMPL>(mk<AND>(r->left(), r->last()->left()),
+                             r->last()->right());
+          chcs.push_back(chcs.back());
+          chcs.back().body = mk<IMPL>(mk<AND>(r->left(), mkNeg(r->last()->left())),
+                             r->last()->last());
+        }
+        else
+        {
+          hr.body = r;
+        }
       }
 
       for (auto & hr : chcs)
@@ -258,21 +314,19 @@ namespace ufo
       // the second loop is needed because we want to distunguish
       // uninterpreted functions used as variables
       // from relations to be synthesized
-      for (auto & hr : chcs)
+      for (auto it = chcs.begin(); it != chcs.end();)
       {
         ExprVector origSrcSymbs, origDstSymbs;
         ExprSet lin;
-        splitBody(hr, origSrcSymbs, lin);
-        if (hr.srcRelation == NULL)
+        HornRuleExt & hr = *it;
+        if (!splitBody(hr, origSrcSymbs, lin))
         {
-          if (hasUninterp(hr.body))
-          {
-            errs () << "Unsupported format\n";
-            errs () << "   " << *hr.body << "\n";
-            exit (1);
-          }
-          hr.srcRelation = mk<TRUE>(m_efac);
+          it = chcs.erase(it);
+          continue;
         }
+        else ++it;
+
+        if (hr.srcRelation == NULL) hr.srcRelation = mk<TRUE>(m_efac);
 
         hr.isFact = isOpX<TRUE>(hr.srcRelation);
         hr.isQuery = (hr.dstRelation == failDecl);
@@ -283,17 +337,76 @@ namespace ufo
 
         hr.assignVarsAndRewrite (origSrcSymbs, invVars[hr.srcRelation],
                                  origDstSymbs, invVarsPrime[hr.dstRelation], lin);
+        if (!hr.origSrcVars.empty())
+          origSrcVars[hr.srcRelation] = hr.origSrcVars;
+
+        ExprSet rlin;
+        for (auto & l : lin)
+        {
+          Expr rl = l;
+          if (!hr.isFact) rl = evalReplace(rl, hr.srcTmp);
+          if (!hr.isQuery) rl = rewriteSet(rl, hr.dstTmp);
+          if (!containsOp<AD_TY>(rl))
+            rlin.insert(rl);
+        }
+        hr.body = conjoin(rlin, m_efac);
+      }
+
+      ExprSet allVars;
+      ExprVector allVarsV, allVarsVp;
+      for (auto & hr : chcs)
+      {
+        allVars.insert(hr.srcTmp.begin(), hr.srcTmp.end());
+        allVars.insert(hr.dstTmp.begin(), hr.dstTmp.end());
+      }
+
+      for (auto & a : allVars)
+      {
+        allVarsV.push_back(a);
+        allVarsVp.push_back(cloneVar(a,
+                     mkTerm<string> (lexical_cast<string>(a) + "'", m_efac)));
+      }
+
+      for (auto & hr : chcs)
+      {
+        ExprSet lin;
+        getConj(hr.body, lin);
+
+        if (!allVars.empty())   // set-encoding
+        {
+          hr.srcVars = allVarsV;
+          hr.dstVars = allVarsVp;
+          if (!hr.isQuery)
+          {
+            invVars[hr.dstRelation] = allVarsV;
+            invVarsPrime[hr.dstRelation] = allVarsVp;
+          }
+
+          filter (hr.body, bind::IsConst(),
+                                     inserter(hr.locVars, hr.locVars.begin()));
+          minusSets(hr.locVars, allVarsV);
+          minusSets(hr.locVars, allVarsVp);
+          if (!hr.isQuery && !hr.isFact)
+            for (int i = 0; i < allVarsV.size(); i++)
+            {
+              if (find(hr.dstTmp.begin(), hr.dstTmp.end(), allVarsV[i])
+                                                            == hr.dstTmp.end())
+                lin.insert(mk<EQ>(allVarsV[i], allVarsVp[i]));
+            }
+        }
 
         if (doElim)
         {
           hr.body = eliminateQuantifiers(conjoin(lin, m_efac), hr.locVars,
-                                                      !hasBV && doArithm, false);
+                                         !hasBV && doArithm, false);
           hr.body = u.removeITE(hr.body);
           hr.body = simplifyArr(hr.body);
           hr.shrinkLocVars();
         }
         else
+        {
           hr.body = conjoin(lin, m_efac);
+        }
       }
 
       if (doElim)
@@ -311,6 +424,34 @@ namespace ufo
         for (auto it = toEraseChcs.rbegin(); it != toEraseChcs.rend(); ++it)
           chcs.erase(chcs.begin() + *it);
         toEraseChcs.clear();
+
+        // get rid of vacuous:
+        while (true)
+        {
+          bool toBreak = true;
+          for (auto & d : decls)
+          {
+            set<int> toEraseChcs;
+            bool toCont = false;
+            for (int c = 0; c < chcs.size(); c++)
+            {
+              if (chcs[c].dstRelation == d->left())
+              {
+                toCont = true;
+                break;
+              }
+              if (chcs[c].srcRelation == d->left())
+                toEraseChcs.insert(c);
+            }
+            if (toCont) continue;
+            for (auto it = toEraseChcs.rbegin(); it != toEraseChcs.rend(); ++it)
+            {
+              toBreak = false;
+              chcs.erase(chcs.begin() + *it);
+            }
+          }
+          if (toBreak) break;
+        }
       }
 
       for (int i = 0; i < chcs.size(); i++)
@@ -329,6 +470,7 @@ namespace ufo
         outs () << (doElim ? "  Simplified " : "  Parsed ") << "CHCs:\n";
         print(debug >= 3, true);
       }
+
       return true;
     }
 
@@ -403,6 +545,7 @@ namespace ufo
       if (debug > 0)
         outs () << "Reducing the number of CHCs: " << preElim.first <<
               "; and the number of declarations: " << preElim.second << "...\n";
+
       if (debug >= 3)
       {
         outs () << "  Current CHC topology:\n";
@@ -564,26 +707,29 @@ namespace ufo
         }
 
         bool found = false;
-        if (h->isInductive)
-        {
-          found = true;
-          for (int j = 0; j < h->srcVars.size(); j++)
-          {
-            if (u.isSat(h->body, mkNeg(mk<EQ>(h->srcVars[j], h->dstVars[j]))))
-            {
-              found = false;
-              break;
-            }
-          }
-        }
+        // if (h->isInductive)
+        // {
+        //   found = true;
+        //   for (int j = 0; j < h->srcVars.size(); j++)
+        //   {
+        //     if (u.isSat(h->body, mkNeg(mk<EQ>(h->srcVars[j], h->dstVars[j]))))
+        //     {
+        //       found = false;
+        //       break;
+        //     }
+        //   }
+        // }
         if (found)
         {
           if (debug >= 2)
             outs () << "  Eliminating CHC: " << h->srcRelation
                     << " -> " << h->dstRelation << "\n";
           if (debug >= 3)
-            outs () << "    inductive but does not change vars: "
-                    << h->body << "\n";
+          {
+            outs () << "    inductive but does not change vars: \n";
+                    // << h->body << "\n";
+                    pprint(h->body);
+          }
           toEraseChcs.insert(i);
         }
         else ++h;
@@ -1149,6 +1295,7 @@ namespace ufo
     {
       std::ofstream enc_chc;
       enc_chc.open("chc.smt2");
+      enc_chc << "(set-logic HORN)\n";
       for (auto & d : decls)
       {
         enc_chc << "(declare-fun " << d->left() << " (";

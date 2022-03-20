@@ -31,7 +31,6 @@ namespace ufo
       errs () << "Cannot unmarshal: " << lexical_cast<std::string> (a) << "\n";
       assert (0); exit (1);
     }
-
   };
 
 
@@ -74,20 +73,22 @@ namespace ufo
 	res = reinterpret_cast<Z3_ast> (Z3_mk_real_sort (ctx));
       else if (isOpX<BOOL_TY> (e))
 	res = reinterpret_cast<Z3_ast> (Z3_mk_bool_sort (ctx));
+      else if (isOpX<AD_TY> (e))
+	res = reinterpret_cast<Z3_ast> (Z3_mk_int_sort (ctx)); // GF: hack for now
       else if (isOpX<ARRAY_TY> (e))
       {
         z3::ast _idx_sort (marshal (e->left (), ctx, cache, seen));
         z3::ast _val_sort (marshal (e->right (), ctx, cache, seen));
-        Z3_sort idx_sort = reinterpret_cast<Z3_sort> 
+        Z3_sort idx_sort = reinterpret_cast<Z3_sort>
           (static_cast<Z3_ast> (_idx_sort));
-        Z3_sort val_sort = reinterpret_cast<Z3_sort> 
+        Z3_sort val_sort = reinterpret_cast<Z3_sort>
           (static_cast<Z3_ast> (_val_sort));
-        res = reinterpret_cast<Z3_ast> 
-          (Z3_mk_array_sort (ctx, idx_sort, val_sort));       
+        res = reinterpret_cast<Z3_ast>
+          (Z3_mk_array_sort (ctx, idx_sort, val_sort));
       }
       else if (isOpX<BVSORT> (e))
         res = reinterpret_cast<Z3_ast> (Z3_mk_bv_sort (ctx, bv::width (e)));
-      
+
       else if (isOpX<INT>(e))
 	{
 	  z3::sort sort (ctx,
@@ -115,7 +116,7 @@ namespace ufo
       {
         z3::sort sort (ctx, Z3_mk_bv_sort (ctx, bv::width (e->arg (1))));
         const MPZ& num = dynamic_cast<const MPZ&> (e->arg (0)->op ());
-        
+
         std::string val = boost::lexical_cast<std::string> (num.get ());
         res = Z3_mk_numeral (ctx, val.c_str (), sort);
       }
@@ -357,13 +358,13 @@ namespace ufo
         else if (isOpX<SELECT>(e))
           res = Z3_mk_select (ctx, t1, t2);
         /** Array Const */
-        else if (isOpX<CONST_ARRAY>(e)) 
+        else if (isOpX<CONST_ARRAY>(e))
         {
           Z3_sort domain = reinterpret_cast<Z3_sort> (static_cast<Z3_ast> (t1));
           res = Z3_mk_const_array (ctx, domain, t2);
           assert (res);
         }
-          
+
         /** Bit-Vectors */
         else if (isOpX<BSEXT> (e) || isOpX<BZEXT> (e) )
         {
@@ -377,7 +378,7 @@ namespace ufo
                                            bv::width (e->arg (1)) - t1_sz,
                                            t1));
           else if (isOpX<BZEXT> (e))
-            res = z3::ast (ctx, 
+            res = z3::ast (ctx,
                            Z3_mk_zero_ext (ctx,
                                            bv::width (e->arg (1)) - t1_sz,
                                            t1));
@@ -435,13 +436,13 @@ namespace ufo
           res = Z3_mk_bvlshr (ctx, t1, t2);
         else if (isOpX<BASHR> (e))
           res = Z3_mk_bvashr (ctx, t1, t2);
-      
+
         else
           return M::marshal (e, ctx, cache, seen);
       }
       else if (isOpX<BEXTRACT> (e))
       {
-//        assert (bv::high (e) > bv::low (e));
+        // assert (bv::high (e) > bv::low (e));
         z3::ast a (ctx, marshal (bv::earg (e), ctx, cache, seen));
         res = Z3_mk_extract (ctx, bv::high (e), bv::low (e), a);
       }
@@ -494,7 +495,7 @@ namespace ufo
 
       if (res == nullptr) ctx.check_error ();
       if (res == nullptr) errs () << "Failed to marshal: " << *e << "\n";
-      
+
       assert (res != NULL);
       z3::ast final (ctx, res);
       seen.insert (expr_ast_map::value_type (e, final));
@@ -509,8 +510,8 @@ namespace ufo
   {
     template <typename C>
     static Expr unmarshal (const z3::ast &z,
-			   ExprFactory &efac, C &cache,
-			   ast_expr_map &seen)
+			   ExprFactory &efac, C &cache, ast_expr_map &seen,
+         std::vector<std::string> &adts_seen, std::vector<Expr> &adts)
     {
       z3::context &ctx = z.ctx ();
 
@@ -524,7 +525,6 @@ namespace ufo
 
       if (kind == Z3_NUMERAL_AST)
 	{
-          
           Z3_sort sort = Z3_get_sort (ctx, z);
 	  std::string snum = Z3_get_numeral_string (ctx, z);
           switch (Z3_get_sort_kind (ctx, sort))
@@ -534,7 +534,7 @@ namespace ufo
           case Z3_INT_SORT:
             return mkTerm (mpz_class (snum), efac);
           case Z3_BV_SORT:
-            return bv::bvnum (mpz_class (snum), 
+            return bv::bvnum (mpz_class (snum),
                               Z3_get_bv_sort_size (ctx, sort), efac);
           default:
             assert (0 && "Unsupported numeric constant");
@@ -544,7 +544,9 @@ namespace ufo
 	{
 	  Z3_sort sort = reinterpret_cast<Z3_sort> (static_cast<Z3_ast> (z));
           Expr domain, range;
-          
+
+    std::string name;
+    Expr adt_name;
 	  switch (Z3_get_sort_kind (ctx, sort))
 	    {
 	    case Z3_BOOL_SORT:
@@ -553,29 +555,49 @@ namespace ufo
 	      return sort::intTy (efac);
 	    case Z3_REAL_SORT:
 	      return sort::realTy (efac);
-            case Z3_BV_SORT:
-              return bv::bvsort (Z3_get_bv_sort_size (ctx, sort), efac);
-            case Z3_ARRAY_SORT:
-              domain = 
-                unmarshal (z3::ast (ctx, 
-                                    Z3_sort_to_ast 
-                                    (ctx, Z3_get_array_sort_domain (ctx, sort))),
-                           efac, cache, seen);
-              range = 
-                unmarshal (z3::ast (ctx, 
-                                    Z3_sort_to_ast 
-                                    (ctx, Z3_get_array_sort_range (ctx, sort))),
-                           efac, cache, seen);
-              return sort::arrayTy (domain, range);
-	    default:
-	      assert (0 && "Unsupported sort");
-	    }
+      case Z3_BV_SORT:
+        return bv::bvsort (Z3_get_bv_sort_size (ctx, sort), efac);
+      case Z3_ARRAY_SORT:
+        domain =
+          unmarshal (z3::ast (ctx,
+                              Z3_sort_to_ast
+                              (ctx, Z3_get_array_sort_domain (ctx, sort))),
+                     efac, cache, seen, adts_seen, adts);
+        range =
+          unmarshal (z3::ast (ctx,
+                              Z3_sort_to_ast
+                              (ctx, Z3_get_array_sort_range (ctx, sort))),
+                     efac, cache, seen, adts_seen, adts);
+        return sort::arrayTy (domain, range);
+      case Z3_DATATYPE_SORT:
+          name = Z3_get_symbol_string(ctx, Z3_get_sort_name(ctx, sort));
+          adt_name = mkTerm<std::string> (name, efac);
+          if (find(adts_seen.begin(), adts_seen.end(), name) == adts_seen.end())
+          {
+            adts_seen.push_back(name);
+            for (int i = 0; i < Z3_get_datatype_sort_num_constructors(ctx, sort); i++)
+            {
+              Z3_func_decl decl = Z3_get_datatype_sort_constructor(ctx, sort, i);
+              Z3_ast zdecl = Z3_func_decl_to_ast(ctx, decl);
+              adts.push_back(unmarshal(z3::ast(ctx, zdecl), efac, cache, seen, adts_seen, adts));
+            }
+          }
+          return sort::adTy (adt_name);
+      default:
+        name = Z3_get_symbol_string(ctx, Z3_get_sort_name(ctx, sort));
+        adt_name = mkTerm<std::string> (name, efac);
+        if (find(adts_seen.begin(), adts_seen.end(), name) == adts_seen.end())
+        {
+          adts_seen.push_back(name);
+        }
+        return sort::adTy (adt_name);
 	}
+      }
       else if (kind == Z3_VAR_AST)
 	{
 	  unsigned idx = Z3_get_index_value (ctx, z);
           z3::ast zsort (ctx, Z3_sort_to_ast (ctx, Z3_get_sort (ctx, z)));
-          Expr sort = unmarshal (zsort, efac, cache, seen);
+          Expr sort = unmarshal (zsort, efac, cache, seen, adts_seen, adts);
           return bind::bvar (idx, sort);
 	}
 
@@ -588,7 +610,7 @@ namespace ufo
 	  Z3_func_decl fdecl = Z3_to_func_decl (ctx, z);
 
 	  Z3_symbol symname = Z3_get_decl_name (ctx, fdecl);
-          
+
           Expr name;
           switch (Z3_get_symbol_kind (ctx, symname))
           {
@@ -607,14 +629,14 @@ namespace ufo
 	      Z3_sort sort = Z3_get_domain  (ctx, fdecl, p);
 	      type.push_back
 		(unmarshal (z3::ast (ctx, Z3_sort_to_ast (ctx, sort)),
-			    efac, cache, seen));
+			    efac, cache, seen, adts_seen, adts));
 	    }
 
 	  type.push_back
 	    (unmarshal (z3::ast (ctx,
 				 Z3_sort_to_ast (ctx,
 						 Z3_get_range (ctx, fdecl))),
-				     efac, cache, seen));
+				     efac, cache, seen, adts_seen, adts));
 
 	  return bind::fdecl (name, type);
 	}
@@ -630,15 +652,15 @@ namespace ufo
                                                0, nullptr,
                                                Z3_get_quantifier_bound_sort (ctx, z, i));
           z3::ast zdecl (ctx, Z3_func_decl_to_ast (ctx, decl));
-          args.push_back (unmarshal (zdecl, efac, cache, seen));
+          args.push_back (unmarshal (zdecl, efac, cache, seen, adts_seen, adts));
           assert (args.back ().get ());
         }
         args.push_back (unmarshal (z3::ast (ctx, Z3_get_quantifier_body (ctx, z)),
-                                   efac, cache, seen));
+                                   efac, cache, seen, adts_seen, adts));
         return Z3_is_quantifier_forall (ctx, z) ?
           mknary<FORALL> (args) : mknary<EXISTS> (args);
       }
-      
+
 
       if (kind != Z3_APP_AST)
           errs () << boost::lexical_cast<std::string> (z) << "\n";
@@ -653,36 +675,36 @@ namespace ufo
 	  assert (Z3_get_app_num_args (ctx, app) == 1);
 	  return mk<NEG> (unmarshal
 			  (z3::ast (ctx, Z3_get_app_arg (ctx, app, 0)),
-				    efac, cache, seen));
+				    efac, cache, seen, adts_seen, adts));
     	}
       if (dkind == Z3_OP_UMINUS)
 	return mk<UN_MINUS> (unmarshal
 			     (z3::ast (ctx, Z3_get_app_arg (ctx, app, 0)),
-			      efac, cache, seen));
+			      efac, cache, seen, adts_seen, adts));
 
       // XXX ignore to_real and to_int operators
       if (dkind == Z3_OP_TO_REAL || dkind == Z3_OP_TO_INT)
         return unmarshal (z3::ast (ctx, Z3_get_app_arg (ctx, app, 0)),
-                          efac, cache, seen);
-      
+                          efac, cache, seen, adts_seen, adts);
+
       if (dkind == Z3_OP_BNOT)
         return mk<BNOT> (unmarshal (z3::ast (ctx, Z3_get_app_arg (ctx, app, 0)),
-                                    efac, cache, seen));
+                                    efac, cache, seen, adts_seen, adts));
       if (dkind == Z3_OP_BNEG)
         return mk<BNEG> (unmarshal (z3::ast (ctx, Z3_get_app_arg (ctx, app, 0)),
-                                    efac, cache, seen));
+                                    efac, cache, seen, adts_seen, adts));
       if (dkind == Z3_OP_BREDAND)
         return mk<BREDAND> (unmarshal (z3::ast (ctx, Z3_get_app_arg (ctx, app, 0)),
-                                       efac, cache, seen));
+                                       efac, cache, seen, adts_seen, adts));
       if (dkind == Z3_OP_BREDOR)
         return mk<BREDOR> (unmarshal (z3::ast (ctx, Z3_get_app_arg (ctx, app, 0)),
-                                      efac, cache, seen));
+                                      efac, cache, seen, adts_seen, adts));
       if (dkind == Z3_OP_SIGN_EXT || dkind == Z3_OP_ZERO_EXT)
       {
-        Expr sort = bv::bvsort (Z3_get_bv_sort_size (ctx, Z3_get_sort (ctx, z)), 
+        Expr sort = bv::bvsort (Z3_get_bv_sort_size (ctx, Z3_get_sort (ctx, z)),
                                 efac);
         Expr arg = unmarshal (z3::ast (ctx, Z3_get_app_arg (ctx, app, 0)),
-                              efac, cache, seen);
+                              efac, cache, seen, adts_seen, adts);
         switch (dkind)
         {
         case Z3_OP_SIGN_EXT:
@@ -692,11 +714,11 @@ namespace ufo
         default: assert (0);
         }
       }
-      
+
       if (dkind == Z3_OP_EXTRACT)
       {
         Expr arg = unmarshal (z3::ast (ctx, Z3_get_app_arg (ctx, app, 0)),
-                              efac, cache, seen);
+                              efac, cache, seen, adts_seen, adts);
 
         Z3_func_decl d = Z3_get_app_decl (ctx, app);
         unsigned high = Z3_get_decl_int_parameter (ctx, d, 0);
@@ -704,14 +726,14 @@ namespace ufo
         return bv::extract (high, low, arg);
       }
 
+
       if (dkind == Z3_OP_AS_ARRAY)
       {
-        z3::ast zdecl 
-          (ctx, Z3_func_decl_to_ast (ctx, 
+        z3::ast zdecl
+          (ctx, Z3_func_decl_to_ast (ctx,
                                      Z3_get_as_array_func_decl (ctx, z)));
-        return mk<AS_ARRAY> (unmarshal (zdecl, efac, cache, seen));
+        return mk<AS_ARRAY> (unmarshal (zdecl, efac, cache, seen, adts_seen, adts));
       }
-
       {
 	typename C::const_iterator it = cache.find (z);
 	if (it != cache.end ()) return it->second;
@@ -721,76 +743,76 @@ namespace ufo
 	if (it != seen.end ()) return it->second;
       }
 
-      
+
       Expr e;
       ExprVector args;
       for (size_t i = 0; i < (size_t)Z3_get_app_num_args (ctx, app); i++)
-	args.push_back (unmarshal
-			(z3::ast(ctx, Z3_get_app_arg(ctx, app, i)), efac, cache, seen));
+        args.push_back (unmarshal
+              (z3::ast(ctx, Z3_get_app_arg(ctx, app, i)), efac, cache, seen, adts_seen, adts));
 
       /** newly introduced Z3 symbol */
-      if (dkind == Z3_OP_UNINTERPRETED)
-	{
-	  Expr res = bind::fapp (unmarshal (z3::func_decl (ctx, fdecl),
-					    efac, cache, seen), args);
-	  // -- XXX maybe use seen instead. not sure what is best.
-	  cache.insert (typename C::value_type (z, res));
-	  return res;
-	}
+      if (dkind == Z3_OP_UNINTERPRETED || dkind == Z3_OP_DT_CONSTRUCTOR)
+      {
+        Expr res = bind::fapp (unmarshal (z3::func_decl (ctx, fdecl),
+                  efac, cache, seen, adts_seen, adts), args);
+        // -- XXX maybe use seen instead. not sure what is best.
+        cache.insert (typename C::value_type (z, res));
+        return res;
+      }
 
       switch (dkind)
-	{
-	case Z3_OP_ITE:
-	  e = mknary<ITE> (args.begin (), args.end ());
-	  break;
-	case Z3_OP_AND:
-	  e = mknary<AND> (args.begin(), args.end());
-	  break;
-	case Z3_OP_OR:
-	  e =  mknary<OR> (args.begin(), args.end());
-	  break;
-	case Z3_OP_XOR:
-	  e = mknary<XOR> (args.begin(), args.end());
-	  break;
-	case Z3_OP_IFF:
-	  e =  mknary<IFF> (args.begin(), args.end());
-	  break;
-	case Z3_OP_IMPLIES:
-	  e =  mknary<IMPL> (args.begin(), args.end());
-	  break;
-	case Z3_OP_EQ:
-	  e =  mknary<EQ> (args.begin(), args.end());
-	  break;
-	case Z3_OP_LT:
-	  e =  mknary<LT> (args.begin(), args.end());
-	  break;
-	case Z3_OP_GT:
-	  e =  mknary<GT> (args.begin(), args.end());
-	  break;
-	case Z3_OP_LE:
-	  e =  mknary<LEQ> (args.begin(), args.end());
-	  break;
-	case Z3_OP_GE:
-	  e =  mknary<GEQ> (args.begin(), args.end());
-	  break;
-	case Z3_OP_ADD:
-	  e =  mknary<PLUS> (args.begin(), args.end());
-	  break;
-	case Z3_OP_SUB:
-	  e =  mknary<MINUS> (args.begin(), args.end());
-	  break;
-	case Z3_OP_MUL:
-	  e =  mknary<MULT> (args.begin(), args.end());
-	  break;
-	case Z3_OP_DIV:
-	  e = mknary<DIV> (args.begin(), args.end());
-	  break;
-        case Z3_OP_IDIV:
-          e = mknary<IDIV> (args.begin (), args.end ());
-          break;
-	case Z3_OP_MOD:
-	  e = mknary<MOD> (args.begin (), args.end ());
-	  break;
+    	{
+      	case Z3_OP_ITE:
+      	  e = mknary<ITE> (args.begin (), args.end ());
+      	  break;
+      	case Z3_OP_AND:
+      	  e = mknary<AND> (args.begin(), args.end());
+      	  break;
+      	case Z3_OP_OR:
+      	  e =  mknary<OR> (args.begin(), args.end());
+      	  break;
+      	case Z3_OP_XOR:
+      	  e = mknary<XOR> (args.begin(), args.end());
+      	  break;
+      	case Z3_OP_IFF:
+      	  e =  mknary<IFF> (args.begin(), args.end());
+      	  break;
+      	case Z3_OP_IMPLIES:
+      	  e =  mknary<IMPL> (args.begin(), args.end());
+      	  break;
+      	case Z3_OP_EQ:
+      	  e =  mknary<EQ> (args.begin(), args.end());
+      	  break;
+      	case Z3_OP_LT:
+      	  e =  mknary<LT> (args.begin(), args.end());
+      	  break;
+      	case Z3_OP_GT:
+      	  e =  mknary<GT> (args.begin(), args.end());
+      	  break;
+      	case Z3_OP_LE:
+      	  e =  mknary<LEQ> (args.begin(), args.end());
+      	  break;
+      	case Z3_OP_GE:
+      	  e =  mknary<GEQ> (args.begin(), args.end());
+      	  break;
+      	case Z3_OP_ADD:
+      	  e =  mknary<PLUS> (args.begin(), args.end());
+      	  break;
+      	case Z3_OP_SUB:
+      	  e =  mknary<MINUS> (args.begin(), args.end());
+      	  break;
+      	case Z3_OP_MUL:
+      	  e =  mknary<MULT> (args.begin(), args.end());
+      	  break;
+      	case Z3_OP_DIV:
+      	  e = mknary<DIV> (args.begin(), args.end());
+      	  break;
+              case Z3_OP_IDIV:
+                e = mknary<IDIV> (args.begin (), args.end ());
+                break;
+      	case Z3_OP_MOD:
+      	  e = mknary<MOD> (args.begin (), args.end ());
+      	  break;
         case Z3_OP_REM:
           e = mknary<REM> (args.begin (), args.end ());
           break;
@@ -804,8 +826,8 @@ namespace ufo
             Expr domain = unmarshal
               (z3::ast (ctx, Z3_sort_to_ast (ctx,
                                              Z3_get_array_sort_domain (ctx, sort))),
-               efac, cache, seen);
-            
+               efac, cache, seen, adts_seen, adts);
+
             e = op::array::constArray (domain, args[0]);
           }
           break;
@@ -860,7 +882,7 @@ namespace ufo
         case Z3_OP_UGT:
           e = mknary<BUGT> (args.begin (), args.end ());
           break;
-        case Z3_OP_SGT:          
+        case Z3_OP_SGT:
           e = mknary<BSGT> (args.begin (), args.end ());
           break;
         case Z3_OP_BAND:
@@ -893,9 +915,12 @@ namespace ufo
         case Z3_OP_CONCAT:
           e = mknary<BCONCAT> (args.begin (), args.end ());
           break;
+        case Z3_OP_INTERNAL:
+          e = mkTerm<std::string> (lexical_cast<std::string> (z), efac);
+          break;
         default:
-	  return U::unmarshal (z, efac, cache, seen);
-	}
+      	  return U::unmarshal (z, efac, cache, seen);
+    	}
 
       seen [z] = e;
       return e;

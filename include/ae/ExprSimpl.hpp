@@ -93,7 +93,7 @@ namespace ufo
   }
 
     // rewrites v1 to contain v1 \ v2
-  template<typename Range> static void minusSets(ExprSet& v1, Range& v2){
+  template<typename Range1, typename Range2> static void minusSets (Range1& v1, Range2& v2){
     for (auto it = v1.begin(); it != v1.end(); ){
       if (find(v2.begin(), v2.end(), *it) != v2.end())
         it = v1.erase(it);
@@ -268,7 +268,8 @@ namespace ufo
 
   inline static void findComplexNumerics (Expr a, ExprSet &terms)
   {
-    if (isIntConst(a) || isOpX<MPZ>(a) || isOp<FDECL>(a)) return;
+    if (isIntConst(a) || isOpX<MPZ>(a) || isOp<FDECL>(a) ||
+        is_bvnum(a) || is_bvconst(a) || isOpX<ARRAY_TY>(a)) return;
     if (isNumeric(a) && !isOpX<ITE>(a))
     {
       bool hasNoNumeric = false;
@@ -761,74 +762,76 @@ namespace ufo
   inline static Expr reBuildCmp(Expr fla, Expr lhs, Expr rhs)
   {
     if (isOpX<EQ>(fla))
-    {
       return mk<EQ>(lhs, rhs);
-    }
     if (isOpX<NEQ>(fla))
-    {
       return mk<NEQ>(lhs, rhs);
-    }
     if (isOpX<LEQ>(fla))
-    {
       return mk<LEQ>(lhs, rhs);
-    }
     if (isOpX<GEQ>(fla))
-    {
       return mk<GEQ>(lhs, rhs);
-    }
     if (isOpX<LT>(fla))
-    {
       return mk<LT>(lhs, rhs);
-    }
-    assert(isOpX<GT>(fla));
-    return mk<GT>(lhs, rhs);
+    if (isOpX<GT>(fla))
+      return mk<GT>(lhs, rhs);
+    if (isOpX<BUGT>(fla))
+      return mk<BUGT>(lhs, rhs);
+    if (isOpX<BUGE>(fla))
+      return mk<BUGE>(lhs, rhs);
+    if (isOpX<BULT>(fla))
+      return mk<BULT>(lhs, rhs);
+    if (isOpX<BULE>(fla))
+      return mk<BULE>(lhs, rhs);
+    assert(0);
   }
 
   inline static Expr reBuildCmpSym(Expr fla, Expr lhs, Expr rhs)
   {
-    if (isOpX<EQ>(fla)){
+    if (isOpX<EQ>(fla))
       return mk<EQ>(rhs, lhs);
-    }
-    if (isOpX<NEQ>(fla)){
+    if (isOpX<NEQ>(fla))
       return mk<NEQ>(rhs, lhs);
-    }
-    if (isOpX<LEQ>(fla)){
+    if (isOpX<LEQ>(fla))
       return mk<GEQ>(rhs, lhs);
-    }
-    if (isOpX<GEQ>(fla)){
+    if (isOpX<GEQ>(fla))
       return mk<LEQ>(rhs, lhs);
-    }
-    if (isOpX<LT>(fla)){
+    if (isOpX<LT>(fla))
       return mk<GT>(rhs, lhs);
-    }
-    assert(isOpX<GT>(fla));
-    return mk<LT>(rhs, lhs);
+    if (isOpX<GT>(fla))
+      return mk<LT>(rhs, lhs);
+    if (isOpX<BUGT>(fla))
+      return mk<BULT>(rhs, lhs);
+    if (isOpX<BUGE>(fla))
+      return mk<BULE>(rhs, lhs);
+    if (isOpX<BULT>(fla))
+      return mk<BUGT>(rhs, lhs);
+    if (isOpX<BULE>(fla))
+      return mk<BUGE>(rhs, lhs);
+    assert(0);
   }
 
   inline static Expr reBuildNegCmp(Expr fla, Expr lhs, Expr rhs)
   {
     if (isOpX<EQ>(fla))
-    {
       return mk<NEQ>(lhs, rhs);
-    }
     if (isOpX<NEQ>(fla))
-    {
       return mk<EQ>(lhs, rhs);
-    }
     if (isOpX<LEQ>(fla))
-    {
       return mk<GT>(lhs, rhs);
-    }
     if (isOpX<GEQ>(fla))
-    {
       return mk<LT>(lhs, rhs);
-    }
     if (isOpX<LT>(fla))
-    {
       return mk<GEQ>(lhs, rhs);
-    }
-    assert(isOpX<GT>(fla));
-    return mk<LEQ>(lhs, rhs);
+    if (isOpX<GT>(fla))
+      return mk<LEQ>(lhs, rhs);
+    if (isOpX<BUGT>(fla))
+      return mk<BULE>(lhs, rhs);
+    if (isOpX<BUGE>(fla))
+      return mk<BULT>(lhs, rhs);
+    if (isOpX<BULT>(fla))
+      return mk<BUGE>(lhs, rhs);
+    if (isOpX<BULE>(fla))
+      return mk<BUGT>(lhs, rhs);
+    assert(0);
   }
 
   // not very pretty method, but..
@@ -882,6 +885,10 @@ namespace ufo
         disjoin(args, fla->getFactory()) :
         conjoin (args, fla->getFactory());
     }
+    else if (isOpX<ITE>(fla))
+    {
+      return mk<ITE>(fla->arg(0), mkNeg(fla->arg(1)), mkNeg(fla->arg(2)));
+    }
     else if (isOpX<XOR>(fla) && fla->arity() == 2)
     {
       return mk<EQ>(fla->arg(0), fla->arg(1));
@@ -889,6 +896,22 @@ namespace ufo
     else if (isOp<ComparissonOp>(fla))
     {
       return reBuildNegCmp(fla, fla->arg(0), fla->arg(1));
+    }
+    else if (isOpX<BUGT>(fla))
+    {
+      return mk<BULE>(fla->arg(0), fla->arg(1));
+    }
+    else if (isOpX<BUGE>(fla))
+    {
+      return mk<BULT>(fla->arg(0), fla->arg(1));
+    }
+    else if (isOpX<BULT>(fla))
+    {
+      return mk<BUGE>(fla->arg(0), fla->arg(1));
+    }
+    else if (isOpX<BULE>(fla))
+    {
+      return mk<BUGT>(fla->arg(0), fla->arg(1));
     }
     else if (isOpX<IMPL>(fla))
     {
@@ -3979,6 +4002,19 @@ namespace ufo
   {
     RW<TransitionOverapprox> rw(new TransitionOverapprox(srcVars, dstVars));
     return dagVisit (rw, exp);
+  }
+
+  void typeSafeInsert(ExprSet& defs, Expr a)
+  {
+    for (auto & d : defs)
+    {
+      if (lexical_cast<string>(d) == lexical_cast<string>(a))
+      {
+        assert(a == d);
+        return;
+      }
+    }
+    defs.insert(a);
   }
 
   inline static Expr mergeIneqs (Expr e1, Expr e2)

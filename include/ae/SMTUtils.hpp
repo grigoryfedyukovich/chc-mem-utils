@@ -162,6 +162,21 @@ namespace ufo
     }
 
     /**
+     * Incremental SMT-check
+     */
+    boost::tribool isSatIncrem(ExprVector& v, int& sz)
+    {
+      sz = 0;
+      while (sz < v.size())
+      {
+        auto res = isSat(v[sz], sz == 0);
+        sz++;
+        if (res == false || indeterminate(res)) return res;
+      }
+      return true;    // sat
+    }
+
+    /**
      * SMT-based formula equivalence check
      */
     boost::tribool isEquiv(Expr a, Expr b)
@@ -613,7 +628,7 @@ namespace ufo
           out << "(" << z3.toSmtLib(var) << " " << z3.toSmtLib(typeOf(var)) << ")";
           if (i != e->arity() - 2) out << " ";
         }
-        out << ") ";
+        out << ") \n";
         print (e->last(), out);
         out << ")";
       }
@@ -633,7 +648,7 @@ namespace ufo
         {
           i++;
           print(c, out);
-          if (i != cnjs.size()) out << " ";
+          if (i != cnjs.size()) out << "\n";
         }
         out << ")";
       }
@@ -647,7 +662,7 @@ namespace ufo
         {
           i++;
           print(d, out);
-          if (i != dsjs.size()) out << " ";
+          if (i != dsjs.size()) out << "\n";
         }
         out << ")";
       }

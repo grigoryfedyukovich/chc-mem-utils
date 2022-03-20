@@ -11,11 +11,20 @@ namespace ufo
   {
     public:
 
-    MemProcessor (ExprFactory &efac, EZ3 &z3, CHCs& r, int debug) :
+    MemProcessor (ExprFactory &efac, EZ3 &z3, CHCs& r,
+                                      map<int, string>& _v, int debug) :
       RndLearnerV3 (efac, z3, r, 1000, false, false, 0, 0, false, 0, false,
-                          false, false, false, 0, false, false, 1000, debug) {}
+                          false, false, false, 0, false, false, 1000, debug),
+                          varIds(_v) {}
 
+    map<Expr, int> allocMap, memMap;
+    map<Expr, ExprSet> allocVals;
+    map<Expr, map<Expr, ExprSet>> aliases, aliasesRev;
+    map<Expr, ExprMap> arrVars, arrVarsPr;
+    Expr memTy, allocTy, defAlloc;
+    map<int, string>& varIds;
     Expr lastDecl = NULL;
+
     bool multiHoudini (vector<HornRuleExt*> worklist, bool recur = true,
       bool fastExit = false)
     {
@@ -70,12 +79,6 @@ namespace ufo
       if (res1) return anyProgress(worklist);
       else return multiHoudini(worklist);
     }
-
-    map<Expr, int> allocMap, memMap;
-    map<Expr, ExprSet> allocVals;
-    map<Expr, map<Expr, ExprSet>> aliases, aliasesRev;
-    map<Expr, ExprMap> arrVars, arrVarsPr;
-    Expr memTy, allocTy, defAlloc;
 
     void initAlloca()
     {
@@ -265,18 +268,24 @@ namespace ufo
       }
     }
 
+    string getNewArrName(Expr bv)
+    {
+      int num = lexical_cast<int>(toMpz(bv));
+      if (varIds[num] == "")
+        return "_new_ar_" + to_string(num);
+      return varIds[num];
+    }
+
     void addAliasVars()
     {
       for (auto & d : ruleManager.decls)
       {
         for (auto & al : aliases[d->left()])
         {
-          auto a = mkConst(mkTerm<string> ("_new_ar_" +
-              lexical_cast<string>(toMpz(al.first)), m_efac),
-                memTy->right());
-          auto b = mkConst(mkTerm<string> ("_new_ar_" +
-              lexical_cast<string>(toMpz(al.first)) + "'", m_efac),
-                memTy->right());
+          auto a = mkConst(mkTerm<string> (
+            getNewArrName(al.first), m_efac), memTy->right());
+          auto b = mkConst(mkTerm<string> (getNewArrName(al.first) + "'",
+            m_efac), memTy->right());
           arrVars[d->left()][al.first] = a;
           arrVarsPr[d->left()][al.first] = b;
         }
@@ -458,9 +467,8 @@ namespace ufo
               if (printLog >= 2) pprint(newDef);
               if (printLog >= 2) outs () << "\n";
 
-              numUpds[num].second = mkConst(mkTerm<string> ("_new_ar_" +
-                  lexical_cast<string>(toMpz(num)) + "_" +
-                      to_string(numUpds[num].first), m_efac), memTy->right());
+              numUpds[num].second = mkConst(mkTerm<string> (getNewArrName(num) +
+                 "_" + to_string(numUpds[num].first), m_efac), memTy->right());
 
               newConstrs.push_back(mk<EQ>(numUpds[num].second, tmp));
               if (printLog >= 2) outs () << "   new restr:  ";
@@ -533,9 +541,91 @@ namespace ufo
       }
       ruleManager.serialize();
     }
+
+    void getMemSaf()
+    {
+      BndExpl bnd(ruleManager, 1000, printLog);
+      for (int i = 0; i < ruleManager.cycles.size(); i++)
+      {
+        vector<int>& cycle = ruleManager.cycles[i];
+        HornRuleExt* hr = &ruleManager.chcs[cycle[0]];
+        if (!hr->isInductive) continue;
+
+        ExprVector& cands = candidates[getVarIndex(hr->srcRelation, decls)];
+        ExprSet pref, trans;
+        getConj(bnd.compactPrefix(i), pref);
+        getConj(hr->body, trans);
+
+        set<int> ctrsPos, ctrsNeg;
+        for (int i = 0; i < hr->srcVars.size(); i++)
+        {
+          if (!is_bvconst(hr->srcVars[i])) continue;
+          cands.clear();
+
+          Expr init = NULL, tr = NULL;
+          for (auto & p : pref)
+          {
+            if (isOpX<EQ>(p))
+            {
+              if (p->left() == hr->srcVars[i])
+                init = p;
+              else if (p->right() == hr->srcVars[i])
+                init = mk<EQ>(p->right(), p->left());
+            }
+            else
+            {
+              cands.push_back(p);
+            }
+          }
+          if (init == NULL) continue;
+
+          for (auto t : trans)
+          {
+            if (!contains(t, hr->srcVars[i]) || !emptyIntersect(t, hr->dstVars))
+              continue;
+            if (isOpX<NEG>(t))
+              t = mkNeg(t->left());
+            if (isOpX<BUGT>(t) || isOpX<BUGE>(t) || isOpX<BULT>(t) || isOpX<BULE>(t))
+            {
+              if (t->left() == hr->srcVars[i])
+                tr = reBuildCmp(t, t->left(),
+                    // hack for now (only works when the counter increments)
+                  mk<BADD>(t->right(), expr::op::bv::bvnum(mkMPZ (1, m_efac), typeOf(t->left()))));
+              else if (t->right() == hr->srcVars[i])
+                tr = reBuildCmpSym(t, t->left(), t->right());
+            }
+          }
+
+          if (tr == NULL) continue;
+
+          if (printLog) outs () << "Tmp cands: " << init << ", " << tr << "\n";
+
+          cands.push_back(tr);
+          cands.push_back(
+                  mk<BUGE>(init->left(), init->right()));
+          cands.push_back(
+                  mk<BULE>(init->left(), init->right()));
+
+                  // outs () << "   bef Hou: ";
+                  // pprint(cands);
+                  // outs () << "\n";
+
+          multiHoudini(ruleManager.dwtoCHCs, true);
+          // outs () << "   after Hou: ";
+          for (auto & c : cands)
+          {
+            outs () << "Found invariant: " <<
+                replaceAll(c, ruleManager.origSrcVars[hr->srcRelation]) << "\n";
+          }
+          // pprint(cands, 2);
+          // outs () << "\n";
+        }
+        // outs () << "  cycl " << hr->body << "\n";
+      }
+    }
   };
 
-  inline void process(string smt, int debug)
+  inline void process(string smt, map<int, string>& varIds, int debug)
   {
     ExprFactory m_efac;
     EZ3 z3(m_efac);
@@ -547,7 +637,7 @@ namespace ufo
 
     if (ruleManager.hasBV)
     {
-      MemProcessor ds(m_efac, z3, ruleManager, debug);
+      MemProcessor ds(m_efac, z3, ruleManager, varIds, debug);
       for (int i = 0; i < ruleManager.cycles.size(); i++)
       {
         Expr dcl = ruleManager.chcs[ruleManager.cycles[i][0]].srcRelation;
@@ -561,6 +651,7 @@ namespace ufo
       ds.printAliases();
       ds.addAliasVars();
       ds.rewriteMem();
+      ds.getMemSaf();
     }
   }
 }
