@@ -853,7 +853,9 @@ namespace ufo
     ExprFactory m_efac;
     EZ3 z3(m_efac);
     CHCs ruleManager(m_efac, z3, debug);
-    if (!ruleManager.parse(smt, !skip_elim)) return;
+    ruleManager.parse(smt);
+    if (!skip_elim)
+      if (!ruleManager.doElim()) return;
     BndExpl bnd(ruleManager, to, debug);
     bnd.exploreTraces(bnd1, bnd2, true);
   };

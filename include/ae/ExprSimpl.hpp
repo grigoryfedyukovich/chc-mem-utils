@@ -4615,12 +4615,13 @@ namespace ufo
       outs () << string(inden, ' ') << "[!\n";
       flas.insert(exp->left());
     }
-    else if (isOpX<EQ>(exp) && containsOp<STORE>(exp))
+    else if ((isOpX<NEQ>(exp) || isOpX<EQ>(exp)) && containsOp<STORE>(exp))
     {
       pprint(exp->left(), inden, false);
       if (containsOp<STORE>(exp->left()))
         outs () << "\n" << string(inden, ' ');
-      outs () << " = ";
+      if (isOpX<NEQ>(exp)) outs () << " != ";
+      else outs () << " = ";
       if (containsOp<STORE>(exp->right()))
         outs () << "\n";
       pprint(exp->right(), inden + 2, false);

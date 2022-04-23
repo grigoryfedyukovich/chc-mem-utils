@@ -2047,7 +2047,12 @@ namespace ufo
     SMTUtils u(m_efac);
 
     CHCs ruleManager(m_efac, z3, debug - 2);
-    auto res = ruleManager.parse(smt, doElim, doArithm);
+
+    bool res = true;
+    ruleManager.parse(smt);
+    if (doElim)
+      res = ruleManager.doElim(doArithm);
+
     if (ser)
     {
       ruleManager.serialize();

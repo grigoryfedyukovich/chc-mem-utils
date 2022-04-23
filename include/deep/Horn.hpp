@@ -47,7 +47,6 @@ namespace ufo
       }
     }
 
-
     void shrinkLocVars()
     {
       for (auto it = locVars.begin(); it != locVars.end();)
@@ -70,7 +69,7 @@ namespace ufo
 
     Expr failDecl;
     vector<HornRuleExt> chcs;
-    vector<HornRuleExt*> wtoCHCs, dwtoCHCs;
+    vector<HornRuleExt*> allCHCs, wtoCHCs, dwtoCHCs;
     ExprVector wtoDecls;
     ExprSet decls;
     map<Expr, ExprVector> invVars,invVarsPrime;
@@ -229,7 +228,7 @@ namespace ufo
       return true;
     }
 
-    bool parse(string smt, bool doElim = true, bool doArithm = true)
+    void parse(string smt)
     {
       if (debug > 0) outs () << "\nPARSING" << "\n=======\n";
       std::unique_ptr<ufo::ZFixedPoint <EZ3> > m_fp;
@@ -311,6 +310,17 @@ namespace ufo
       if (debug > 0) outs () << "Reserved space for " << chcs.size()
                           << " CHCs and " << decls.size() << " declarations\n";
 
+      Expr s = op::bv::bvsort (64, m_efac); // hardcode for now
+      Expr alloc, mem, allocP, memP;
+      alloc = mkTerm<string> ("_alloc", m_efac);
+      mem = mkTerm<string> ("_mem", m_efac);
+      alloc = mkConst(alloc, mk<ARRAY_TY> (s, s));
+      mem = mkConst(mem, mk<ARRAY_TY> (s, mk<ARRAY_TY> (s, s)));
+      allocP = cloneVar(alloc, mkTerm<string> ("_alloc'", m_efac));
+      memP = cloneVar(mem, mkTerm<string> ("_mem'", m_efac));
+
+      ExprVector names;
+      // outs () << alloc << ", "<< allocP << ", "<< mem << ", "<< memP << "\n";
       // the second loop is needed because we want to distunguish
       // uninterpreted functions used as variables
       // from relations to be synthesized
@@ -344,12 +354,15 @@ namespace ufo
         for (auto & l : lin)
         {
           Expr rl = l;
-          if (!hr.isFact) rl = evalReplace(rl, hr.srcTmp);
-          if (!hr.isQuery) rl = rewriteSet(rl, hr.dstTmp);
+          if (!hr.isFact) rl = evalReplace(rl, hr.srcTmp,
+                                  alloc, mem, allocP, memP, names);
+          if (!hr.isQuery) rl = rewriteSet(rl, hr.dstTmp,
+                                  alloc, mem, allocP, memP, names);
           if (!containsOp<AD_TY>(rl))
             rlin.insert(rl);
         }
         hr.body = conjoin(rlin, m_efac);
+
       }
 
       ExprSet allVars;
@@ -367,6 +380,20 @@ namespace ufo
                      mkTerm<string> (lexical_cast<string>(a) + "'", m_efac)));
       }
 
+      if (!allVars.empty())   // set-encoding
+      {
+        ExprSet updDecls;
+        for (auto & d : decls)
+        {
+          ExprVector args;
+          args.push_back(*d->args_begin ());
+          for (auto & a : allVars) args.push_back(a->left()->last());
+          args.push_back(d->last());
+          updDecls.insert(mknary<FDECL>(args));
+        }
+        decls = updDecls;
+      }
+
       for (auto & hr : chcs)
       {
         ExprSet lin;
@@ -374,101 +401,123 @@ namespace ufo
 
         if (!allVars.empty())   // set-encoding
         {
-          hr.srcVars = allVarsV;
-          hr.dstVars = allVarsVp;
+          if (!hr.isFact)
+          {
+            hr.srcVars = allVarsV;
+          }
+          else
+          {
+            hr.locVars.insert(hr.locVars.end(), allVarsV.begin(), allVarsV.end());
+          }
+
           if (!hr.isQuery)
           {
+            hr.dstVars = allVarsVp;
             invVars[hr.dstRelation] = allVarsV;
             invVarsPrime[hr.dstRelation] = allVarsVp;
           }
+          else
+          {
+            hr.locVars.insert(hr.locVars.end(), allVarsVp.begin(), allVarsVp.end());
+          }
 
-          filter (hr.body, bind::IsConst(),
-                                     inserter(hr.locVars, hr.locVars.begin()));
-          minusSets(hr.locVars, allVarsV);
-          minusSets(hr.locVars, allVarsVp);
-          if (!hr.isQuery && !hr.isFact)
+          if (hr.isFact)
+          {
+            // assume that this fact does not rewrite _alloc
+            lin.insert(mk<EQ>(allocP,
+              mk<CONST_ARRAY>(s, op::bv::bvnum(mkMPZ(0, m_efac), s))));
+          }
+          else if (!hr.isQuery)
+          {
             for (int i = 0; i < allVarsV.size(); i++)
             {
               if (find(hr.dstTmp.begin(), hr.dstTmp.end(), allVarsV[i])
                                                             == hr.dstTmp.end())
                 lin.insert(mk<EQ>(allVarsV[i], allVarsVp[i]));
             }
-        }
-
-        if (doElim)
-        {
-          hr.body = eliminateQuantifiers(conjoin(lin, m_efac), hr.locVars,
-                                         !hasBV && doArithm, false);
-          hr.body = u.removeITE(hr.body);
-          hr.body = simplifyArr(hr.body);
-          hr.shrinkLocVars();
-        }
-        else
-        {
+          }
           hr.body = conjoin(lin, m_efac);
         }
+        hr.body = simpleQE(hr.body, hr.locVars);
+
       }
-
-      if (doElim)
-      {
-        int sz = chcs.size();
-        for (int c = 0; c < chcs.size(); c++)
-        {
-          chcsToCheck1.insert(c);
-          chcsToCheck2.insert(c);
-        }
-        if (!eliminateDecls()) return false;
-
-        // eliminating all at once,
-        // otherwise elements at chcsToCheck* need updates
-        for (auto it = toEraseChcs.rbegin(); it != toEraseChcs.rend(); ++it)
-          chcs.erase(chcs.begin() + *it);
-        toEraseChcs.clear();
-
-        // get rid of vacuous:
-        while (true)
-        {
-          bool toBreak = true;
-          for (auto & d : decls)
-          {
-            set<int> toEraseChcs;
-            bool toCont = false;
-            for (int c = 0; c < chcs.size(); c++)
-            {
-              if (chcs[c].dstRelation == d->left())
-              {
-                toCont = true;
-                break;
-              }
-              if (chcs[c].srcRelation == d->left())
-                toEraseChcs.insert(c);
-            }
-            if (toCont) continue;
-            for (auto it = toEraseChcs.rbegin(); it != toEraseChcs.rend(); ++it)
-            {
-              toBreak = false;
-              chcs.erase(chcs.begin() + *it);
-            }
-          }
-          if (toBreak) break;
-        }
-      }
-
       for (int i = 0; i < chcs.size(); i++)
+      {
         outgs[chcs[i].srcRelation].push_back(i);
-
-      wtoSort();
-
-      // prepare a version of wtoCHCs w/o queries
-      dwtoCHCs = wtoCHCs;
-      for (auto it = dwtoCHCs.begin(); it != dwtoCHCs.end();)
-        if ((*it)->isQuery) it = dwtoCHCs.erase(it);
-          else ++it;
+        allCHCs.push_back(&chcs[i]);
+      }
 
       if (debug >= 0)
       {
-        outs () << (doElim ? "  Simplified " : "  Parsed ") << "CHCs:\n";
-        print(debug >= 3, true);
+        outs () << "  Parsed CHCs:\n";
+        print(debug >= 1, true);
+      }
+
+      // TODO: wto and cycles to be completely rewritten
+    }
+
+    bool doElim(bool doArithm = true)
+    {
+      // for (auto & hr : chcs)
+      // {
+      //   hr.body = eliminateQuantifiers(hr.body, hr.locVars,
+      //                                  !hasBV && doArithm, false);
+      //   hr.body = u.removeITE(hr.body);
+      //   hr.body = simplifyArr(hr.body);
+      //   hr.shrinkLocVars();
+      // }
+
+      int sz = chcs.size();
+      for (int c = 0; c < chcs.size(); c++)
+      {
+        chcsToCheck1.insert(c);
+        chcsToCheck2.insert(c);
+      }
+      if (!eliminateDecls()) return false;
+
+      // eliminating all at once,
+      // otherwise elements at chcsToCheck* need updates
+      for (auto it = toEraseChcs.rbegin(); it != toEraseChcs.rend(); ++it)
+        chcs.erase(chcs.begin() + *it);
+      toEraseChcs.clear();
+
+      // get rid of vacuous:
+      while (true)
+      {
+        bool toBreak = true;
+        for (auto & d : decls)
+        {
+          set<int> toEraseChcs;
+          bool toCont = false;
+          for (int c = 0; c < chcs.size(); c++)
+          {
+            if (chcs[c].dstRelation == d->left())
+            {
+              toCont = true;
+              break;
+            }
+            if (chcs[c].srcRelation == d->left())
+              toEraseChcs.insert(c);
+          }
+          if (toCont) continue;
+          for (auto it = toEraseChcs.rbegin(); it != toEraseChcs.rend(); ++it)
+          {
+            toBreak = false;
+            chcs.erase(chcs.begin() + *it);
+          }
+        }
+        if (toBreak) break;
+      }
+      if (chcs.empty())
+      {
+        outs () << "Vacuity eliminated all\nSuccess\n";
+        return false;
+      }
+
+      if (debug >= 0)
+      {
+        outs () << "  Simplified CHCs:\n";
+        print(debug >= 1, true);
       }
 
       return true;
@@ -699,7 +748,11 @@ namespace ufo
               outs () << "  Eliminating CHC: " << h->srcRelation
                       << " -> " << h->dstRelation << "\n";
             if (debug >= 3)
-              outs () << "    its body is false: " << h->body << "\n";
+            {
+              outs () << "    its body is false: ";
+              pprint(h->body);
+              outs () << "\n";
+            }
             toEraseChcs.insert(i);
             continue;
           }
@@ -727,8 +780,7 @@ namespace ufo
           if (debug >= 3)
           {
             outs () << "    inductive but does not change vars: \n";
-                    // << h->body << "\n";
-                    pprint(h->body);
+            pprint(h->body);
           }
           toEraseChcs.insert(i);
         }
@@ -1174,60 +1226,6 @@ namespace ufo
       }
     }
 
-    // Transformations
-
-    void copyIterations(Expr decl, int num)
-    {
-      HornRuleExt* hr;
-      for (auto &a : chcs)
-        if (a.srcRelation == decl->left() && a.dstRelation == decl->left())
-          hr = &a;
-      Expr pre = getPrecondition(hr);
-      ExprSet newCnjs;
-      newCnjs.insert(mk<NEG>(pre));
-      for (int i = 0; i < hr->srcVars.size(); i++)
-        newCnjs.insert(mk<EQ>(hr->dstVars[i], hr->srcVars[i]));
-      Expr body2 = conjoin(newCnjs, m_efac);
-
-      // adaping the code from BndExpl.hpp
-      ExprVector ssa, bindVars1, bindVars2,newLocals;
-      int bindVar_index = 0, locVar_index = 0;
-
-      for (int c = 0; c < num; c++)
-      {
-        Expr body = hr->body;
-        bindVars2.clear();
-        if (c != 0)
-        {
-          body = replaceAll(mk<OR>(body, body2), hr->srcVars, bindVars1);
-          for (int i = 0; i < hr->locVars.size(); i++)
-          {
-            Expr new_name = mkTerm<string> ("__loc_var_" +
-              to_string(locVar_index++), m_efac);
-            Expr var = cloneVar(hr->locVars[i], new_name);
-            body = replaceAll(body, hr->locVars[i], var);
-            newLocals.push_back(var);
-          }
-        }
-
-        if (c != num-1)
-        {
-          for (int i = 0; i < hr->dstVars.size(); i++)
-          {
-            Expr new_name = mkTerm<string> ("__bnd_var_" +
-              to_string(bindVar_index++), m_efac);
-            bindVars2.push_back(cloneVar(hr->dstVars[i], new_name));
-            body = replaceAll(body, hr->dstVars[i], bindVars2[i]);
-            newLocals.push_back(bindVars2[i]);
-          }
-        }
-        ssa.push_back(body);
-        bindVars1 = bindVars2;
-      }
-      hr->body = conjoin(ssa, m_efac);
-      hr->locVars.insert(hr->locVars.end(), newLocals.begin(), newLocals.end());
-    }
-
     void print (bool full = false, bool dump_cfg = false)
     {
       std::ofstream enc_chc;
@@ -1276,9 +1274,9 @@ namespace ufo
         else outs() << "\n";
         if (dump_cfg)
         {
-          enc_chc << ' ' << hr.srcRelation;
+          enc_chc << "\"" << hr.srcRelation << "\"";
           enc_chc << " -> ";
-          enc_chc << ' ' << hr.dstRelation;
+          enc_chc << "\"" << hr.dstRelation << "\"";
           enc_chc << '\n';
         }
       }
@@ -1340,7 +1338,6 @@ namespace ufo
             }
           }
         }
-
         if (c.isInductive) enc_chc << "; inductive\n";
         else if (c.isFact) enc_chc << "; fact\n";
         else if (c.isQuery) enc_chc << "; query\n";
