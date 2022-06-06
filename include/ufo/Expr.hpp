@@ -1045,7 +1045,7 @@ namespace expr
 
   inline void intrusive_ptr_release (ENode *v)
   {
-    v->efac ().Deref (v);
+    v->efac().Deref (v);
   }
 
   struct BoolExprFn
@@ -3212,6 +3212,7 @@ namespace expr
       using namespace bv;
       inline Expr typeOf (Expr v)
       {
+        auto & efac = v->getFactory();
         if (isOpX<VARIANT> (v)) return typeOf (variant::mainVariant (v));
 
         if (isOpX<FAPP> (v))
@@ -3221,18 +3222,19 @@ namespace expr
         }
 
         if (isOpX<ITE>(v)) return typeOf(v->last());
-        if (isOp<BoolOp>(v) || isOp<ComparissonOp> (v)) return mk<BOOL_TY> (v->efac ());
-        if (isOpX<MPZ> (v)) return mk<INT_TY> (v->efac ());
-        if (isOpX<MPQ> (v)) return mk<REAL_TY> (v->efac ());
+        if (isOp<BoolOp>(v) || isOp<ComparissonOp> (v) ||
+            isOpX<FORALL>(v) || isOpX<EXISTS>(v)) return mk<BOOL_TY> (efac);
+        if (isOpX<MPZ> (v)) return mk<INT_TY> (efac);
+        if (isOpX<MPQ> (v)) return mk<REAL_TY> (efac);
 
         if (isOpX<BIND> (v)) return bind::type (v);
 
         if (isBoolVar (v) || isBoolConst (v))
-          return mk<BOOL_TY> (v->efac ());
+          return mk<BOOL_TY> (efac);
         if (isIntVar (v) || isIntConst (v))
-          return mk<INT_TY> (v->efac ());
+          return mk<INT_TY> (efac);
         if (isRealVar (v) || isRealConst (v))
-          return mk<REAL_TY> (v->efac ());
+          return mk<REAL_TY> (efac);
 
         if (isOp<NumericOp>(v)) return typeOf(v->left());
 
@@ -3251,14 +3253,18 @@ namespace expr
           if (isOpX<BSEXT>(v) || isOpX<BZEXT>(v)) return v->last();
           if (isOpX<BCONCAT>(v))
           {
-            return bvsort (width(typeOf(v->arg(0))) + width(typeOf(v->arg(1))), v->efac ());
+            return bvsort (width(typeOf(v->arg(0))) + width(typeOf(v->arg(1))),
+              efac);
           }
-          if (isOpX<BEXTRACT>(v) || isOpX<BREPEAT>(v) ||
-              isOpX<INT2BV>(v) || isOpX<BV2INT>(v))
+          if (isOpX<BEXTRACT>(v))
+          {
+            return bvsort (boost::lexical_cast<unsigned>(v->left()) -
+                           boost::lexical_cast<unsigned>(v->right()) + 1, efac);
+          }
+          if (isOpX<BREPEAT>(v) || isOpX<INT2BV>(v) || isOpX<BV2INT>(v))
           {
             assert(0 && "not implemented");
           }
-
           return typeOf(v->left());
         }
 

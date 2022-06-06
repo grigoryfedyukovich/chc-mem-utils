@@ -102,33 +102,35 @@ namespace ufo
       for (auto c = lin.begin(); c != lin.end(); )
       {
         Expr cnj = *c;
-        if (isOpX<FAPP>(cnj) && isOpX<FDECL>(cnj->left()))
+        if (isOpX<FAPP>(cnj))
         {
           Expr rel = cnj->left();
-          if (find(decls.begin(), decls.end(), rel) == decls.end())
           {
-            // uninterpreted pred with no def rules is found
-            // treat it FALSE
-            return false;
-          }
-          else
-          {
-            if (hr.srcRelation != NULL)
             {
-              errs () << "Nonlinear CHC is currently unsupported: ["
-                      << *hr.srcRelation << " /\\ " << *rel->left() << " -> "
-                      << *hr.dstRelation << "]\n";
-              exit(1);
+              if (hr.srcRelation != NULL)
+              {
+                errs () << "Nonlinear CHC is currently unsupported: ["
+                        << *hr.srcRelation << " /\\ " << *rel->left() << " -> "
+                        << *hr.dstRelation << "]\n";
+                exit(1);
+              }
+              hr.srcRelation = rel->left();
+              for (auto it = cnj->args_begin()+1; it != cnj->args_end(); ++it)
+                srcVars.push_back(*it);
+              c = lin.erase(c);
             }
-            hr.srcRelation = rel->left();
-            for (auto it = cnj->args_begin()+1; it != cnj->args_end(); ++it)
-              srcVars.push_back(*it);
-            c = lin.erase(c);
           }
         }
         else ++c;
       }
       return true;
+    }
+
+    bool addedDecl(Expr a)
+    {
+      for (auto & d : decls)
+        if (d->left() == a) return true;
+      return false;
     }
 
     void addDecl (Expr a)
@@ -228,7 +230,7 @@ namespace ufo
       return true;
     }
 
-    void parse(string smt)
+    void parse(string smt, bool setEnc = true)
     {
       if (debug > 0) outs () << "\nPARSING" << "\n=======\n";
       std::unique_ptr<ufo::ZFixedPoint <EZ3> > m_fp;
@@ -255,7 +257,21 @@ namespace ufo
         HornRuleExt& hr = chcs.back();
         while (true)
         {
-          auto r1 = replaceAll(r, eqs);
+          Expr r1;
+          if (debug >= 0)
+          {
+            r1 = r;
+            for (auto & e : eqs)
+            {
+              if (r1 != replaceAll(r1, e.first, e.second))
+                outs () << "rewriting " << (e.first)->left() << " -> " << (e.second)->left() << "\n";
+              r1 = replaceAll(r1, e.first, e.second);
+            }
+          }
+          else
+          {
+             r1 = replaceAll(r, eqs);
+          }
           if (r == r1) break;
           else r = r1;
         }
@@ -311,16 +327,27 @@ namespace ufo
                           << " CHCs and " << decls.size() << " declarations\n";
 
       Expr s = op::bv::bvsort (64, m_efac); // hardcode for now
-      Expr alloc, mem, allocP, memP;
+      Expr alloc, mem, allocP, memP, off, offP, siz, sizP, aux, auxP;
       alloc = mkTerm<string> ("_alloc", m_efac);
       mem = mkTerm<string> ("_mem", m_efac);
+      off = mkTerm<string> ("_off", m_efac);
+      siz = mkTerm<string> ("_siz", m_efac);
+      aux = mkTerm<string> ("_aux", m_efac);
       alloc = mkConst(alloc, mk<ARRAY_TY> (s, s));
       mem = mkConst(mem, mk<ARRAY_TY> (s, mk<ARRAY_TY> (s, s)));
+      off = mkConst(off, mk<ARRAY_TY> (s, s));
+      siz = mkConst(siz, mk<ARRAY_TY> (s, s));
+      aux = mkConst(aux, mk<ARRAY_TY> (s, s));
+      alloc = mkConst(alloc, mk<ARRAY_TY> (s, s));
       allocP = cloneVar(alloc, mkTerm<string> ("_alloc'", m_efac));
       memP = cloneVar(mem, mkTerm<string> ("_mem'", m_efac));
+      offP = cloneVar(off, mkTerm<string> ("_off'", m_efac));
+      sizP = cloneVar(siz, mkTerm<string> ("_siz'", m_efac));
+      auxP = cloneVar(siz, mkTerm<string> ("_aux'", m_efac));
+
+      ExprSet allVars = {alloc, mem, off, siz};
 
       ExprVector names;
-      // outs () << alloc << ", "<< allocP << ", "<< mem << ", "<< memP << "\n";
       // the second loop is needed because we want to distunguish
       // uninterpreted functions used as variables
       // from relations to be synthesized
@@ -329,8 +356,11 @@ namespace ufo
         ExprVector origSrcSymbs, origDstSymbs;
         ExprSet lin;
         HornRuleExt & hr = *it;
-        if (!splitBody(hr, origSrcSymbs, lin))
+        if (!splitBody(hr, origSrcSymbs, lin) ||
+              (hr.srcRelation != NULL && !addedDecl(hr.srcRelation)))
         {
+          outs() << "Deleting vacuous CHC:\n"
+             << hr.srcRelation << " -> " << hr.dstRelation << "\n";
           it = chcs.erase(it);
           continue;
         }
@@ -344,44 +374,50 @@ namespace ufo
 
         origDstSymbs = hr.dstVars;
         hr.dstVars.clear();
-
         hr.assignVarsAndRewrite (origSrcSymbs, invVars[hr.srcRelation],
                                  origDstSymbs, invVarsPrime[hr.dstRelation], lin);
         if (!hr.origSrcVars.empty())
           origSrcVars[hr.srcRelation] = hr.origSrcVars;
 
         ExprSet rlin;
-        for (auto & l : lin)
+        if (setEnc)
         {
-          Expr rl = l;
-          if (!hr.isFact) rl = evalReplace(rl, hr.srcTmp,
-                                  alloc, mem, allocP, memP, names);
-          if (!hr.isQuery) rl = rewriteSet(rl, hr.dstTmp,
-                                  alloc, mem, allocP, memP, names);
-          if (!containsOp<AD_TY>(rl))
-            rlin.insert(rl);
+          for (auto & l : lin)
+          {
+            Expr rl = l;
+            if (!hr.isFact) rl = evalReplace(rl, hr.srcTmp,
+              alloc, mem, off, siz, aux, allocP, memP, offP, sizP, auxP, names);
+            rl = rewriteSet(rl, hr.dstTmp,
+              alloc, mem, off, siz, aux, allocP, memP, offP, sizP, auxP, names);
+            rl = typeRepair(rl);
+            if (!containsOp<AD_TY>(rl))
+              getConj(rl, rlin);
+          }
+          hr.body = conjoin(rlin, m_efac);
         }
-        hr.body = conjoin(rlin, m_efac);
-
+        else
+        {
+          hr.body = conjoin(lin, m_efac);
+        }
       }
 
-      ExprSet allVars;
       ExprVector allVarsV, allVarsVp;
-      for (auto & hr : chcs)
+      if (setEnc)   // set-encoding
       {
-        allVars.insert(hr.srcTmp.begin(), hr.srcTmp.end());
-        allVars.insert(hr.dstTmp.begin(), hr.dstTmp.end());
-      }
+        for (auto & hr : chcs)
+        {
+          allVars.insert(hr.srcTmp.begin(), hr.srcTmp.end());
+          allVars.insert(hr.dstTmp.begin(), hr.dstTmp.end());
+        }
 
-      for (auto & a : allVars)
-      {
-        allVarsV.push_back(a);
-        allVarsVp.push_back(cloneVar(a,
-                     mkTerm<string> (lexical_cast<string>(a) + "'", m_efac)));
-      }
+        minusSets(allVars, names);
 
-      if (!allVars.empty())   // set-encoding
-      {
+        for (auto & a : allVars)
+        {
+          allVarsV.push_back(a);
+          allVarsVp.push_back(cloneVar(a,
+                       mkTerm<string> (lexical_cast<string>(a) + "'", m_efac)));
+        }
         ExprSet updDecls;
         for (auto & d : decls)
         {
@@ -399,8 +435,9 @@ namespace ufo
         ExprSet lin;
         getConj(hr.body, lin);
 
-        if (!allVars.empty())   // set-encoding
+        if (setEnc)   // set-encoding
         {
+
           if (!hr.isFact)
           {
             hr.srcVars = allVarsV;
@@ -420,12 +457,13 @@ namespace ufo
           {
             hr.locVars.insert(hr.locVars.end(), allVarsVp.begin(), allVarsVp.end());
           }
-
           if (hr.isFact)
           {
+            Expr cArr = mk<CONST_ARRAY>(s, op::bv::bvnum(mkMPZ(0, m_efac), s));
             // assume that this fact does not rewrite _alloc
-            lin.insert(mk<EQ>(allocP,
-              mk<CONST_ARRAY>(s, op::bv::bvnum(mkMPZ(0, m_efac), s))));
+            lin.insert(mk<EQ>(allocP, cArr));
+            lin.insert(mk<EQ>(auxP, cArr));
+            lin.insert(mk<EQ>(offP, cArr));
           }
           else if (!hr.isQuery)
           {
@@ -439,7 +477,6 @@ namespace ufo
           hr.body = conjoin(lin, m_efac);
         }
         hr.body = simpleQE(hr.body, hr.locVars);
-
       }
       for (int i = 0; i < chcs.size(); i++)
       {
@@ -456,16 +493,11 @@ namespace ufo
       // TODO: wto and cycles to be completely rewritten
     }
 
-    bool doElim(bool doArithm = true)
+    vector<int> simplCHCs;
+    bool doElim(bool doArithm = true, vector<int> _simplCHCs = {})
     {
-      // for (auto & hr : chcs)
-      // {
-      //   hr.body = eliminateQuantifiers(hr.body, hr.locVars,
-      //                                  !hasBV && doArithm, false);
-      //   hr.body = u.removeITE(hr.body);
-      //   hr.body = simplifyArr(hr.body);
-      //   hr.shrinkLocVars();
-      // }
+      //keep here:
+      simplCHCs = _simplCHCs;
 
       int sz = chcs.size();
       for (int c = 0; c < chcs.size(); c++)
@@ -520,6 +552,13 @@ namespace ufo
         print(debug >= 1, true);
       }
 
+      allCHCs.clear();
+      for (int i = 0; i < chcs.size(); i++)
+      {
+        outgs[chcs[i].srcRelation].push_back(i);
+        allCHCs.push_back(&chcs[i]);
+      }
+
       return true;
     }
 
@@ -528,8 +567,10 @@ namespace ufo
       set<int> toEraseChcsTmp;
       for (int i = 0; i < chcs.size(); i++)
       {
-        if (find(toEraseChcs.begin(), toEraseChcs.end(), i) != toEraseChcs.end()) continue;
-        if (find(toEraseChcsTmp.begin(), toEraseChcsTmp.end(), i) != toEraseChcsTmp.end()) continue;
+        if (find(toEraseChcs.begin(), toEraseChcs.end(), i)
+                            != toEraseChcs.end()) continue;
+        if (find(toEraseChcsTmp.begin(), toEraseChcsTmp.end(), i)
+                            != toEraseChcsTmp.end()) continue;
 
         auto c = &chcs[i];
         if (c->isQuery && !c->isFact)
@@ -542,21 +583,26 @@ namespace ufo
               // thus, c->srcRelation should be false
               for (int j = 0; j < chcs.size(); j++)
               {
-                if (find(toEraseChcs.begin(), toEraseChcs.end(), j) != toEraseChcs.end()) continue;
-                if (find(toEraseChcsTmp.begin(), toEraseChcsTmp.end(), j) != toEraseChcsTmp.end()) continue;
+                if (find(toEraseChcs.begin(), toEraseChcs.end(), j)
+                            != toEraseChcs.end()) continue;
+                if (find(toEraseChcsTmp.begin(), toEraseChcsTmp.end(), j)
+                            != toEraseChcsTmp.end()) continue;
 
                 HornRuleExt* s = &chcs[j];
                 if (s->srcRelation == c->srcRelation)
                 {
-                  // search for vacuous cases where s == inv -> inv2   and   c == inv /\ true -> false
+                  // search for vacuous cases where s == inv -> inv2   and
+                                    // c == inv /\ true -> false
                   // then, inv can only be false, thus s does not give any constraint
-                  toEraseChcsTmp.insert(j);  // could erase here, but ther will be a mess with pointers
+                  toEraseChcsTmp.insert(j);  // could erase here, but ther will
+                                                      //be a mess with pointers
                 }
                 else if (s->dstRelation == c->srcRelation)
                 {
                   s->isQuery = true;
                   s->dstRelation = failDecl;
-                  s->locVars.insert(s->locVars.end(), s->dstVars.begin(), s->dstVars.end());
+                  s->locVars.insert(s->locVars.end(), s->dstVars.begin(),
+                                        s->dstVars.end());
                   s->dstVars.clear();
                   chcsToCheck1.insert(j);
                   chcsToCheck2.insert(j);
@@ -614,17 +660,17 @@ namespace ufo
         vector<int> src, dst;
         for (int i = 0; i < chcs.size(); i++)
         {
-          if (find(toEraseChcs.begin(), toEraseChcs.end(), i) != toEraseChcs.end()) continue;
-          if (find(toEraseChcsTmp.begin(), toEraseChcsTmp.end(), i) != toEraseChcsTmp.end()) continue;
-
+          if (find(toEraseChcs.begin(), toEraseChcs.end(), i)
+                                            != toEraseChcs.end()) continue;
+          if (find(toEraseChcsTmp.begin(), toEraseChcsTmp.end(), i)
+                                            != toEraseChcsTmp.end()) continue;
           if (chcs[i].srcRelation == (*d)->left()) src.push_back(i);
           if (chcs[i].dstRelation == (*d)->left()) dst.push_back(i);
         }
 
-        if ((src.size() > 0 && dst.size() > 0) &&
-            emptyIntersect(src, dst))
+        if (src.size() > 0 && dst.size() > 0 && emptyIntersect(src, dst) &&
+            emptyIntersect(simplCHCs, src) && emptyIntersect(simplCHCs, dst))
         {
-
           if (declToRemove != NULL)
             if (declToRemove->arity() > (*d)->arity())
               { ++d; continue; }
@@ -760,18 +806,6 @@ namespace ufo
         }
 
         bool found = false;
-        // if (h->isInductive)
-        // {
-        //   found = true;
-        //   for (int j = 0; j < h->srcVars.size(); j++)
-        //   {
-        //     if (u.isSat(h->body, mkNeg(mk<EQ>(h->srcVars[j], h->dstVars[j]))))
-        //     {
-        //       found = false;
-        //       break;
-        //     }
-        //   }
-        // }
         if (found)
         {
           if (debug >= 2)
@@ -790,17 +824,21 @@ namespace ufo
 
     void combineCHCs()
     {
-      return;
       for (int i = 0; i < chcs.size(); i++)
       {
         if (find(toEraseChcs.begin(), toEraseChcs.end(), i) != toEraseChcs.end())
           continue;
+        if (find(simplCHCs.begin(), simplCHCs.end(), i) != simplCHCs.end())
+          continue;
+        if (chcs[i].isQuery) continue;
 
         set<int> toComb = {i};
         HornRuleExt& s = chcs[i];
         for (int j = i + 1; j < chcs.size(); j++)
         {
           if (find(toEraseChcs.begin(), toEraseChcs.end(), j) != toEraseChcs.end())
+            continue;
+          if (find(simplCHCs.begin(), simplCHCs.end(), j) != simplCHCs.end())
             continue;
 
           HornRuleExt& d = chcs[j];
@@ -1255,6 +1293,7 @@ namespace ufo
           outs () << ")";
         }
         else outs () << "[#" << hr.srcVars.size() << "]";
+        if (full) outs () << "\n         ";
         outs () << " -> " << * hr.dstRelation;
 
         if (full && hr.dstVars.size() > 0)

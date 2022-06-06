@@ -11,6 +11,22 @@ using namespace boost::multiprecision;
 
 namespace ufo
 {
+  template <typename T, typename R> static int getVarIndex(T e, R& vec)
+  {
+    int i = 0;
+    for (auto v = vec.begin(); v != vec.end(); ++v, ++i)
+      if (*v == e) return i;
+    return -1;
+  }
+
+  template<typename T> static bool contains(vector<T>& v, T e) {
+    return find(v.begin(), v.end(), e) != v.end();
+  }
+
+  template<typename T> static void unique_push_back(T e, vector<T>& v) {
+    if (!contains(v, e)) v.push_back(e);
+  }
+
   template<typename Range> static Expr conjoin(Range& conjs, ExprFactory &efac){
     return
       (conjs.size() == 0) ? mk<TRUE>(efac) :
@@ -734,10 +750,6 @@ namespace ufo
       exp = ineqReverter(exp);
     }
     return exp;
-  }
-
-  template<typename T> static void unique_push_back(T e, vector<T>& v) {
-    if (find(v.begin(), v.end(), e) == v.end()) v.push_back(e);
   }
 
   template<typename T> struct RW
@@ -1825,17 +1837,6 @@ namespace ufo
     ExprSet allVars;
     getExtraVars(fla, vars, allVars);
     return allVars.empty();
-  }
-
-  template <typename T, typename R> static int getVarIndex(T e, R& vec)
-  {
-    int i = 0;
-    for (auto & v : vec)
-    {
-      if (v == e) return i;
-      i++;
-    }
-    return -1;
   }
 
   static Expr rewriteMultAdd (Expr exp);

@@ -11,11 +11,10 @@ namespace ufo
   {
     public:
 
-    MemProcessor (ExprFactory &efac, EZ3 &z3, CHCs& r,
-                                      map<int, string>& _v, int debug) :
-      RndLearnerV3 (efac, z3, r, 1000, false, false, 0, 0, false, 0, false,
-                          false, false, false, 0, false, false, 1000, debug),
-                          varIds(_v) {}
+    MemProcessor (ExprFactory &m_efac, EZ3 &z3, CHCs& r,
+                                      map<int, string>& _v, int debug, int to) :
+      RndLearnerV3 (m_efac, z3, r, to, false, false, 0, 0, false, 0, false,
+                false, false, false, 0, false, false, to, debug), varIds(_v) {}
 
     map<Expr, int> allocMap, memMap;
     map<Expr, ExprSet> allocVals;
@@ -34,7 +33,8 @@ namespace ufo
       bool res1 = true;
       for (auto &hr: worklist)
       {
-        if (printLog >= 3) outs () << "  Doing CHC check (" << hr->srcRelation << " -> "
+        if (printLog >= 3)
+          outs () << "  Doing CHC check (" << hr->srcRelation << " -> "
                                    << hr->dstRelation << ")\n";
         if (hr->isQuery) continue;
         tribool b = checkCHC(*hr, candidates);
@@ -60,10 +60,12 @@ namespace ufo
           }
 
           // first try to remove candidates immediately by their models (i.e., vals)
-          // then, invalidate (one-by-one) all candidates for which Z3 failed to find a model
+          // then, invalidate (one-by-one) all candidates
+          //            for which Z3 failed to find a model
 
           for (int i = 0; i < 3 /*weakeningPriorities.size() */; i++)
-            if (weaken (invNum, candidates[invNum], vals, hr, sf, (*weakeningPriorities[i]), i > 0))
+            if (weaken (invNum, candidates[invNum], vals, hr, sf,
+                (*weakeningPriorities[i]), i > 0))
               break;
 
           if (recur)
@@ -90,7 +92,8 @@ namespace ufo
       {
         memMap[d->left()] = -1;
         allocMap[d->left()] = -1;
-        if (printLog >= 2) outs () << "initAlloca, decl: " << d->left() << "\n";
+        if (printLog >= 2)
+          outs () << "initAlloca, decl: " << d->left() << "\n";
         auto & vs = ruleManager.invVars[d->left()];
         for (int i = 0; i < vs.size(); i++)
         {
@@ -98,19 +101,22 @@ namespace ufo
           if (isArray(v))
           {
             if (isOpX<BVSORT>(typeOf(v)->left()) &&
-                isOpX<BVSORT>(typeOf(v)->right()))
+                isOpX<BVSORT>(typeOf(v)->right()) &&
+                lexical_cast<string>(v) == "_alloc")
             {
-              if (printLog >= 2) outs () << "  alloca arg # "  << i << ": " << vs[i] << "   " << typeOf(vs[i]) << "\n";
+              if (printLog >= 2) outs () << "  alloca arg # "  << i << ": "
+                  << v << "   " << typeOf(v) << "\n";
               assert(allocMap[d->left()] == -1);
               allocMap[d->left()] = i;
             }
             else if (isOpX<BVSORT>(typeOf(v)->left()) &&
-                     isOpX<ARRAY_TY>(typeOf(v)->right()))
+                     isOpX<ARRAY_TY>(typeOf(v)->right()) &&
+                     lexical_cast<string>(v) == "_mem")
             {
-              if (printLog >= 2) outs () << "  mem arg # "  << i << ": " << vs[i] << "   " << typeOf(vs[i]) << "\n";
+              if (printLog >= 2) outs () << "  mem arg # "  << i << ": "
+                  << v << "   " << typeOf(v) << "\n";
               if(memMap[d->left()] != -1)
               {
-                pprint(vs);
                 exit(9);
               }
               memMap[d->left()] = i;
@@ -119,7 +125,6 @@ namespace ufo
         }
         assert(allocMap[d->left()] != -1);
         if(memMap[d->left()] == -1){
-          pprint(vs);
           exit(9);
         }
         Expr ty = typeOf(ruleManager.invVars[d->left()][memMap[d->left()]]);
@@ -206,7 +211,8 @@ namespace ufo
       else
       {
         if (printLog >= 2) outs () << "fail for " << lastDecl << "\n";
-        Expr mdl = u.getModel(ruleManager.invVarsPrime[lastDecl][allocMap[lastDecl]]);
+        Expr mdl = u.getModel(
+                  ruleManager.invVarsPrime[lastDecl][allocMap[lastDecl]]);
         ExprVector st;
         filter (mdl, IsStore (), inserter(st, st.begin()));
         if (printLog >= 2) outs () << "   mdl:  " << mdl << "\n";
@@ -244,8 +250,10 @@ namespace ufo
           dsjs.insert(mk<EQ>(key, k));
         candidates[getVarIndex(decl, decls)] = {mknary<FORALL>(
               ExprVector({key->left(), mk<IMPL>(eq, disjoin(dsjs, m_efac))}))};
-        if (printLog >= 2) outs () << "  decl: " << decl << ", " << ptr << "\ncands:\n";
-        if (printLog >= 2) pprint(candidates[getVarIndex(decl, decls)]);
+        if (printLog >= 2)
+          outs () << "  decl: " << decl << ", " << ptr << "\ncands:\n";
+        if (printLog >= 2)
+          pprint(candidates[getVarIndex(decl, decls)]);
       }
       if (multiHoudini(ruleManager.allCHCs, false, true))
       {
@@ -254,7 +262,8 @@ namespace ufo
       else
       {
         if (printLog >= 2) outs () << "fail for " << lastDecl << "\n";
-        Expr mdl = u.getModel(ruleManager.invVarsPrime[lastDecl][allocMap[lastDecl]]);
+        Expr mdl = u.getModel(
+               ruleManager.invVarsPrime[lastDecl][allocMap[lastDecl]]);
         if (printLog >= 2) outs () << "   mdl:  " << mdl << "\n";
         ExprVector st;
         filter (mdl, IsStore (), inserter(st, st.begin()));
@@ -287,12 +296,14 @@ namespace ufo
     {
       for (auto & d : ruleManager.decls)
       {
-        if (printLog >= 2) outs () << "  >> decl >>  " << d->left() << ":\n";
+        if (printLog >= 2)
+          outs () << "  >> decl >>  " << d->left() << ":\n";
         for (auto & al : aliases[d->left()])
         {
           for (auto & a : al.second)
           {
-            if (printLog >= 2) outs () << "    " << a << "  ->  " << al.first << "\n";
+            if (printLog >= 2)
+              outs () << "    " << a << "  ->  " << al.first << "\n";
           }
         }
       }
@@ -312,24 +323,29 @@ namespace ufo
       {
         for (auto & al : aliases[d->left()])
         {
-          auto a = mkConst(mkTerm<string> (
-            getNewArrName(al.first), m_efac), memTy->right());
-          auto b = mkConst(mkTerm<string> (getNewArrName(al.first) + "'",
-            m_efac), memTy->right());
+          auto name = getNewArrName(al.first);
+          auto a = mkConst(mkTerm<string> (name, m_efac), memTy->right());
+          auto b = mkConst(mkTerm<string> (name + "'", m_efac), memTy->right());
           arrVars[d->left()][al.first] = a;
           arrVarsPr[d->left()][al.first] = b;
+          auto ind = getVarIndex(d->left(), decls);
+          invarVars[ind][
+            ruleManager.invVars[d->left()].size() - 1 +
+            arrVars[d->left()].size()] = a;
         }
       }
     }
 
-    Expr getUpdLiteral(Expr body, Expr ty)
+    Expr getUpdLiteral(Expr body, Expr ty, string name)
     {
       ExprSet tmp;
       getConj(body, tmp);
       Expr upd = NULL;
       for (auto c : tmp)
       {
-        if (isOpX<EQ>(c) && typeOf(c->left()) == ty)
+        if (isOpX<EQ>(c) && typeOf(c->left()) == ty &&
+            (lexical_cast<string>(c->left()) == name ||
+             lexical_cast<string>(c->right()) == name))
         {
           assert(upd == NULL && "cannot have several updates of this type");
           upd = c;
@@ -340,7 +356,7 @@ namespace ufo
 
     // assumes small-block encoding:
     //  - fact has no memory manipulation, and actually is empty
-    //  - every CHC has at most one operation (either for mem, alloca, or non-memory)
+    //  - every CHC has at most one operation (either for mem, alloca, or non-mem)
     //  - only unprimed mem/alloca are used in the RHS of assignments
     // so the algorithm goes for each CHC:
     //  - search for select(_alloc, X) terms in the body
@@ -359,10 +375,12 @@ namespace ufo
     {
       for (auto &r : ruleManager.chcs)
       {
-        if (printLog >= 2) outs () << "-----------   processing CHC:   " << r.srcRelation
-                                            << " -> " << r.dstRelation << "\n";
+        if (printLog >= 2)
+          outs () << "-----------   processing CHC:   "
+                  << r.srcRelation << " -> " << r.dstRelation <<
+                  (r.isQuery ? " [Q]": (r.isInductive ? " [TR]": "")) << "\n";
         Expr body = r.body;
-        Expr allocUpd = getUpdLiteral(body, allocTy);
+        Expr allocUpd = getUpdLiteral(body, allocTy, "_alloc");
         if (r.isInductive && allocMap[r.dstRelation] != -1)
         {
           ExprVector toElim = {r.dstVars[allocMap[r.dstRelation]]};
@@ -372,8 +390,6 @@ namespace ufo
         if (r.isFact)
         {
           assert(!contains(body, memTy));
-          for (auto & v : arrVars[r.srcRelation])
-            r.srcVars.push_back(v.second);
           for (auto & v : arrVarsPr[r.dstRelation])
             r.dstVars.push_back(v.second);
           continue;
@@ -385,22 +401,41 @@ namespace ufo
         Expr alloSrc = r.srcVars[allocMap[rel]];
         Expr memVar = r.srcVars[memMap[r.srcRelation]];
 
-        // step 0: find alloc-selects, replace them by respective vals (need to be an invar)
+        // step 0: find alloc-selects, replace them by respective vals
+        //                      (need to be an invar)
         vector<ExprMap> aliasCombs;
         ExprVector se;
         ExprSet seSimp;
         filter (body, IsSelect (), inserter(se, se.begin()));
-        for (auto s : se) seSimp.insert(simplifyArr(s));
-
-        for (auto s : seSimp)
+        for (auto s : se)
         {
+          Expr sSimp = simplifyArr(s);
+          r.body = replaceAll(r.body, s, sSimp);
+          seSimp.insert(sSimp);
+        }
+        pprint(r.body);
+
+        ExprSet considered;
+        for (auto sit = seSimp.rbegin(); sit != seSimp.rend(); ++sit)
+        {
+          auto s = *sit;
           if (s->left() == alloSrc)
           {
-            assert(is_bvnum(s->last()) && "possibly, an encoding issue");
+            ExprSet tmp;
+            if (is_bvnum(s->last()))
+            {
+              tmp = aliasesRev[rel][s->last()];
+            }
+            else
+            {
+              for (auto & val : allocVals[rel])
+                if (lexical_cast<string>(toMpz(val)) != "0")
+                  tmp.insert(val);
+            }
 
             if (aliasCombs.empty())
             {
-              for (auto & a : aliasesRev[rel][s->last()])
+              for (auto & a : tmp)
               {
                 ExprMap tmp;
                 tmp[s] = a;
@@ -413,12 +448,13 @@ namespace ufo
             {
               vector<ExprMap> aliasCombsTmp = aliasCombs;
               aliasCombs.clear();
-              for (auto & a : aliasesRev[rel][s->last()])
+              for (auto & a : tmp)
               {
                 for (auto & m : aliasCombsTmp)
                 {
                   ExprMap tmp = m;
-                  if (printLog >= 2) outs () << "alias:  " << s->last() << " -> " << a << "\n";
+                  if (printLog >= 2)
+                    outs () << "alias:  " << s->last() << " -> " << a << "\n";
                   assert (m[s] == NULL);
                   tmp[s] = a;
                   aliasCombs.push_back(tmp);
@@ -435,12 +471,22 @@ namespace ufo
         {
           Expr newBody = body;
           ExprVector newConstrs, combEqs;
-          for (auto & v : m) combEqs.push_back(mk<EQ>(v.first, v.second));
+          for (auto & v : m)
+          {
+            auto tmp = v.first;
+            for (auto it = combEqs.begin(); it != combEqs.end(); ++it)
+            {
+              tmp = replaceAll(tmp, (*it)->left(), (*it)->right());
+            }
+
+            combEqs.push_back(mk<EQ>(tmp, v.second));
+          }
           if (printLog >= 2)
           {
             outs () << "  combination # " << (it++) << ":\n";
             pprint(combEqs, 4);
           }
+          Expr combEqss = conjoin(combEqs, m_efac);
           newBody = replaceAll(newBody, m);
 
           ExprSet arrVarsMached;
@@ -451,6 +497,7 @@ namespace ufo
             if (printLog >= 2) outs () << "rewriting " << mk<SELECT>(memVar, num)
                                        << " with " << replTo << "\n";
             newBody = replaceAll(newBody, mk<SELECT>(memVar, num), replTo);
+            combEqss = replaceAll(combEqss, mk<SELECT>(memVar, num), replTo);
           }
           if (printLog >= 2)
           {
@@ -504,13 +551,13 @@ namespace ufo
                                           arrVarsPr[r.dstRelation][num]));
           }
 
-          Expr memUpd = getUpdLiteral(newBody, memTy);
+          Expr memUpd = getUpdLiteral(newBody, memTy, "_mem");
           if (memUpd == NULL)
             newConstrs.push_back(newBody);
           else
             newConstrs.push_back(replaceAll(newBody, memUpd, mk<TRUE>(m_efac)));
 
-          newBody = mk<IMPL>(conjoin(combEqs, m_efac), conjoin(newConstrs, m_efac));
+          newBody = mk<IMPL>(combEqss, conjoin(newConstrs, m_efac));
           newBodies.push_back(newBody);
         }
         if (aliasCombs.empty())
@@ -525,6 +572,20 @@ namespace ufo
                                   arrVarsPr[r.dstRelation][num]));
           }
           r.body = conjoin(newBody, m_efac);
+
+          for (auto & a : arrVars[r.dstRelation])
+          {
+            if (printLog >= 2)
+              outs () << "rewriting " << mk<SELECT>(memVar, a.first)
+                                      << " with " << a.second << "\n";
+            r.body = replaceAll(r.body, mk<SELECT>(memVar, a.first), a.second);
+          }
+
+          if (printLog >= 2)
+          {
+            outs () << "aliasCombs empty:\n";
+            pprint(r.body);
+          }
         }
         else
         {
@@ -535,6 +596,8 @@ namespace ufo
           // sanity check after repl:
           assert(!contains(r.body, memTy));
         }
+
+        r.body = simplifyBool(simplifyArr(r.body));
 
         for (auto & v : arrVars[r.srcRelation])
           r.srcVars.push_back(v.second);
@@ -554,113 +617,51 @@ namespace ufo
       ruleManager.decls = updDecls;
       for (auto & d : ruleManager.decls)
       {
-        for (auto & v : arrVars[d->left()])
+        for (auto & v : arrVars[d->left()]){
+          ruleManager.invVars[d->left()].push_back(v.second);
+        }
+        for (auto & v : arrVarsPr[d->left()]){
           ruleManager.invVarsPrime[d->left()].push_back(v.second);
-      }
-    }
-
-    void getMemSaf()
-    {
-      BndExpl bnd(ruleManager, 1000, printLog);
-      for (int i = 0; i < ruleManager.cycles.size(); i++)
-      {
-        vector<int>& cycle = ruleManager.cycles[i];
-        HornRuleExt* hr = &ruleManager.chcs[cycle[0]];
-        if (!hr->isInductive) continue;
-
-        ExprVector& cands = candidates[getVarIndex(hr->srcRelation, decls)];
-        ExprSet pref, trans;
-        getConj(bnd.compactPrefix(i), pref);
-        getConj(hr->body, trans);
-
-        set<int> ctrsPos, ctrsNeg;
-        for (int i = 0; i < hr->srcVars.size(); i++)
-        {
-          if (!is_bvconst(hr->srcVars[i])) continue;
-          cands.clear();
-
-          Expr init = NULL, tr = NULL;
-          for (auto & p : pref)
-          {
-            if (isOpX<EQ>(p))
-            {
-              if (p->left() == hr->srcVars[i])
-                init = p;
-              else if (p->right() == hr->srcVars[i])
-                init = mk<EQ>(p->right(), p->left());
-            }
-            else
-            {
-              cands.push_back(p);
-            }
-          }
-          if (init == NULL) continue;
-
-          for (auto t : trans)
-          {
-            if (!contains(t, hr->srcVars[i]) || !emptyIntersect(t, hr->dstVars))
-              continue;
-            if (isOpX<NEG>(t))
-              t = mkNeg(t->left());
-            if (isOpX<BUGT>(t) || isOpX<BUGE>(t) || isOpX<BULT>(t) || isOpX<BULE>(t))
-            {
-              if (t->left() == hr->srcVars[i])
-                tr = reBuildCmp(t, t->left(),
-                    // hack for now (only works when the counter increments)
-                  mk<BADD>(t->right(), expr::op::bv::bvnum(mkMPZ (1, m_efac), typeOf(t->left()))));
-              else if (t->right() == hr->srcVars[i])
-                tr = reBuildCmpSym(t, t->left(), t->right());
-            }
-          }
-
-          if (tr == NULL) continue;
-
-          if (printLog) outs () << "Tmp cands: " << init << ", " << tr << "\n";
-
-          cands.push_back(tr);
-          cands.push_back(
-                  mk<BUGE>(init->left(), init->right()));
-          cands.push_back(
-                  mk<BULE>(init->left(), init->right()));
-
-          multiHoudini(ruleManager.allCHCs, true);
-          for (auto & c : cands)
-          {
-            outs () << "Found invariant: " <<
-                replaceAll(c, ruleManager.origSrcVars[hr->srcRelation]) << "\n";
-          }
         }
       }
     }
   };
 
-  inline void process(string smt, map<int, string>& varIds, int debug)
+  inline void process(string smt,
+                      map<int, string>& varIds,  // obsolete, to remove
+                      int debug, int mem, int to)
   {
     ExprFactory m_efac;
     EZ3 z3(m_efac);
-    SMTUtils u(m_efac);
-
     CHCs ruleManager(m_efac, z3, debug - 2);
-    ruleManager.parse(smt);
+    ruleManager.parse(smt, mem);
+
+    ruleManager.wtoSort();
+    BndExpl bnd(ruleManager, debug);
+    if (!ruleManager.hasCycles())
+      return (void)bnd.exploreTraces(1, ruleManager.chcs.size(), true);
+
     if (!ruleManager.hasBV) return;
 
-    MemProcessor ds(m_efac, z3, ruleManager, varIds, debug);
+    MemProcessor ds(m_efac, z3, ruleManager, varIds, debug, to);
+
     for (auto dcl : ruleManager.decls)
       ds.initializeDecl(dcl->left());
 
-    ds.initAlloca();
-    ds.getInitAllocaVals();
-    ds.getAllocaVals();
-    ds.getAliases();
-    ds.printAliases();
-    ds.addAliasVars();
-    ds.rewriteMem();
-    auto res = ruleManager.doElim(false);
-    if (!res) return;
-    ruleManager.serialize();
-
-    // ignore for now
-    // ds.getMemSaf();
+    if (mem)
+    {
+      ds.initAlloca();
+      ds.getInitAllocaVals();
+      ds.getAllocaVals();
+      ds.getAliases();
+      ds.printAliases();
+      ds.addAliasVars();
+      ds.rewriteMem();
+      ruleManager.print(true, false);
+      auto res = ruleManager.doElim(false);
+      if (!res) return;
+      ruleManager.serialize();
+    }
   }
 }
 

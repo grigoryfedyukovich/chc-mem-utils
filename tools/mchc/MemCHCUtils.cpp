@@ -54,6 +54,8 @@ int main (int argc, char ** argv)
 {
   const char *OPT_DEBUG = "--debug";
   const char *OPT_HELP = "--help";
+  const char *OPT_MEM = "--mem";
+  const char *OPT_TO = "--to";
 
   if (getBoolValue(OPT_HELP, false, argc, argv) || argc == 1)
   {
@@ -69,6 +71,8 @@ int main (int argc, char ** argv)
   }
 
   int debug = getIntValue(OPT_DEBUG, 0, argc, argv);
+  bool mem = getBoolValue(OPT_MEM, false, argc, argv);
+  int to = getIntValue(OPT_TO, 1000, argc, argv);
 
   //get names
   const string pref("; var_id: ");
@@ -90,6 +94,6 @@ int main (int argc, char ** argv)
     }
   }
 
-  process(string(argv[argc-1]), var_ids, debug);
+  process(string(argv[argc-1]), var_ids, debug, mem, to);
   return 0;
 }
