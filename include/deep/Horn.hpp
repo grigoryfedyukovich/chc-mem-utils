@@ -106,6 +106,16 @@ namespace ufo
         {
           Expr rel = cnj->left();
           {
+            auto strName = lexical_cast<string>(rel->left());
+            if (contains(supportedPreds, strName) ||
+                contains(supportedPredsAss, strName))
+            {
+              if (debug > 0)
+                outs () << "hr.body \"" << hr.body << "\" has "
+                        << strName << "\n";
+              ++c;
+            }
+            else
             {
               if (hr.srcRelation != NULL)
               {
@@ -301,6 +311,19 @@ namespace ufo
       {
         Expr head = hr.body->right();
         hr.body = hr.body->left();
+        if (isOpX<FAPP>(head))
+        {
+          auto name = head->left()->left();
+          auto ind = getVarIndex(lexical_cast<string>(name), supportedPreds);
+          if (ind >= 0)
+          {
+            string name_str = supportedPredsAss[ind];
+            auto name_upd = mkTerm<string> (name_str, m_efac);
+            head = replaceAll(head, name, name_upd);
+            hr.body = mk<AND>(hr.body, mk<NEG>(head));
+            head = mk<FALSE>(m_efac);
+          }
+        }
         if (isOpX<FAPP>(head))
         {
           if (head->left()->arity() == 2 &&

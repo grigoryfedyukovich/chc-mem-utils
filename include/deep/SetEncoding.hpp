@@ -10,6 +10,18 @@ using namespace boost::multiprecision;
 
 namespace ufo
 {
+  static vector<string> supportedPreds = {
+              "state-r-ok",  "state-rw-ok",
+              "state-w-ok", "state-is-cstring",
+              "evaluate-b"   // to support, actually
+            };
+
+  // GF: to generate automatically
+  static vector<string> supportedPredsAss = {
+            "state-r-ok-ass", "state-rw-ok-ass",
+            "state-w-ok-ass", "state-is-cstring-ass"
+            };
+
   inline static void varToDefs(ExprSet& defs, Expr var)
   {
     if (isOpX<FAPP>(var) && var->left()->arity() == 2)
@@ -21,12 +33,13 @@ namespace ufo
     ExprFactory& efac;
     ExprSet& defs;
     ExprVector& names;
-    Expr alloc, mem, off, siz, allocP, memP, offP, sizP, aux, auxP, o, ty;
+    Expr alloc, mem, off, siz, allocP, memP, offP, sizP, aux, auxP, ty;
          // alloc and aux should be initially zeroes
          // then aux (v) == 1 if v is cstring,
          //      aux (v) == 2 if v is read-only
          //      aux (v) == 3 if v is write-only
          //      aux (v) == 4 if v is read and write
+    ExprVector nums;
 
     SetDecoder (ExprSet& _defs,
          Expr _alloc, Expr _mem, Expr _off, Expr _siz, Expr _aux,
@@ -37,7 +50,7 @@ namespace ufo
       allocP(_allocP), memP(_memP), offP(_offP), sizP(_sizP), auxP(_auxP),
       names(_names) {
         ty = alloc->left()->right()->right();
-        o = bvnum(mkMPZ(0, efac), ty);
+        for (int i = 0; i <= 4; i++) nums.push_back(bvnum(mkMPZ(i, efac), ty));
       };
 
     Expr getVarId (Expr var)
@@ -63,7 +76,49 @@ namespace ufo
         _alloc, _mem, _off, _siz, _aux,
         _allocP, _memP, _offP, _sizP, _auxP, _names) {};
 
-    Expr updAllocs(Expr arg, Expr ty, Expr obj, Expr allSz)
+    Expr assumeOks(Expr obj, Expr allSz, string fname)
+    {
+      Expr var;
+      Expr offs;
+      if (isOpX<BADD>(obj))
+      {
+        var = obj->left();
+        assert(isOpX<BMUL>(obj->right()));
+        offs = obj->right()->left();
+      }
+      else
+      {
+        auto str = lexical_cast<string>(obj);
+        if (str.find("\"") != string::npos)
+          str = str.substr(1, str.length() - 2);
+        auto name = mkTerm<string>(str, efac);
+        var = mk<FAPP>(mk<FDECL>(name, ty));
+        offs = nums[0];
+      }
+
+      Expr h = getVarId(var);
+      Expr auxUpd;
+      if (fname == "state-r-ok")
+        auxUpd = mk<EQ>(auxP, mk<STORE>(aux, h, nums[2]));
+      else if (fname == "state-w-ok")
+        auxUpd = mk<EQ>(auxP, mk<STORE>(aux, h, nums[3]));
+      else if (fname == "state-rw-ok")
+        auxUpd = mk<EQ>(auxP, mk<STORE>(aux, h, nums[4]));
+      else
+        auxUpd = mk<TRUE>(efac);
+
+      typeSafeInsert(defs, alloc);
+      typeSafeInsert(defs, siz);
+      typeSafeInsert(defs, aux);
+      return mk<AND>(
+          auxUpd,
+          mk<AND>(mk<EQ>(allocP, mk<STORE>(alloc, h, h)),
+                  mk<EQ>(sizP, mk<STORE>(siz, h, allSz))),
+          mk<EQ>(offP, mk<STORE>(off, h, offs))
+        );
+    }
+
+    Expr updAllocs(Expr arg, Expr ty, Expr obj, Expr allSz, bool ptr)
     {
       auto str = lexical_cast<string>(obj);
       if (str.find("\"") != string::npos)
@@ -73,20 +128,22 @@ namespace ufo
 
       if (allSz != NULL)
       {
+        Expr h = getVarId(var);
+
         typeSafeInsert(defs, alloc);
         typeSafeInsert(defs, siz);
-        Expr h = getVarId(var);
+        typeSafeInsert(defs, off);
         return mk<AND>(
             mk<AND>(mk<EQ>(allocP, mk<STORE>(alloc, h, h)),
                     mk<EQ>(sizP, mk<STORE>(siz, h, allSz))),
-            mk<EQ>(offP, mk<STORE>(off, h, o))
+            mk<EQ>(offP, mk<STORE>(off, h, nums[0]))
           );
       }
       else
       {
         Expr offs;
         Expr argTmp = isOpX<BADD>(arg) ? arg->left() : arg;
-        if (contains(names, argTmp) || contains(names, var))
+        if (ptr)
         {
           Expr k = getVarId(argTmp);
           Expr h = getVarId(var);
@@ -120,9 +177,145 @@ namespace ufo
       }
     }
 
+    Expr assumeCstring(Expr ty, Expr obj)
+    {
+      auto str = lexical_cast<string>(obj);
+      if (str.find("\"") != string::npos)
+      {
+        str = str.substr(1, str.length() - 2);
+      }
+      auto name = mkTerm<string>(str, efac);
+      Expr var = mk<FAPP>(mk<FDECL>(name, ty));
+      typeSafeInsert(defs, alloc);
+      typeSafeInsert(defs, aux);
+      typeSafeInsert(defs, off);
+      Expr h = getVarId(var);
+
+      auto key = mkConst(mkTerm<string> ("k", efac), ty);
+      ExprVector assm = {
+        mk<BULE>(nums[0], key),
+        mk<BULT>(key, mk<SELECT>(siz, mk<SELECT>(allocP, h))),
+        mk<EQ>(mk<SELECT>(mk<SELECT>(mem, mk<SELECT>(allocP, h)), key), nums[0])
+      };
+
+      return mknary<AND>(ExprVector{
+          mk<EQ>(allocP, mk<STORE>(alloc, h, h)),
+          mk<EQ>(auxP, mk<STORE>(aux, h, nums[1])),
+          mk<EQ>(offP, mk<STORE>(off, h, nums[0])),
+          mknary<EXISTS>(ExprVector{key->left(), conjoin(assm, efac)})}
+        );
+    }
+
+    Expr assertCstring(Expr obj)
+    {
+      Expr var, s;
+      if (isOpX<BADD>(obj))
+      {
+        var = obj->left();
+        s = obj->right();
+      }
+      else
+      {
+        var = obj;
+        s = nums[0];
+      }
+
+      typeSafeInsert(defs, alloc);
+      typeSafeInsert(defs, siz);
+      typeSafeInsert(defs, aux);
+      Expr h = getVarId(var);
+      s = mk<BADD>(s, mk<SELECT>(off, h));
+      Expr ss = mk<SELECT>(siz, mk<SELECT>(alloc, h));
+
+      auto key = mkConst(mkTerm<string> ("k", efac), ty);
+      ExprVector tmp = {
+        mk<BULE>(s, key),
+        mk<BULT>(key, mk<SELECT>(siz, mk<SELECT>(alloc, h))),
+        mk<EQ>(mk<SELECT>(mk<SELECT>(mem, mk<SELECT>(alloc, h)), key), nums[0])
+      };
+
+      // don't require `mk<EQ>(mk<SELECT>(aux, mk<SELECT>(alloc, h)), nums[1])`
+      // to allow finding "implicit" cstrings
+      return mk<AND>(
+        mknary<EXISTS>(ExprVector{key->left(), conjoin(tmp, efac)}),
+        mk<NEQ>(nums[0], mk<SELECT>(alloc, h))
+      );
+    }
+
+    Expr assertAllocs(Expr obj, Expr allSz, string fname)
+    {
+      assert (allSz != NULL);
+      Expr var, s;
+      if (isOpX<BADD>(obj))
+      {
+        var = obj->left();
+        s = obj->right();
+      }
+      else
+      {
+        var = obj;
+        s = nums[0];
+      }
+
+      Expr h = getVarId(var);
+      Expr auxAss;
+      Expr al = mk<SELECT>(alloc, h);
+      Expr rwacc = mk<EQ>(mk<SELECT>(aux, al), nums[4]);
+
+      if (fname == "state-r-ok-ass")
+        auxAss = mk<OR>(
+          mk<EQ>(mk<SELECT>(aux, al), nums[2]), rwacc);
+      else if (fname == "state-w-ok-ass")
+        auxAss = mk<OR>(
+          mk<EQ>(mk<SELECT>(aux, al), nums[3]), rwacc);
+      else if (fname == "state-rw-ok-ass")
+        auxAss = rwacc;
+      else
+        auxAss = mk<TRUE>(efac);
+
+      typeSafeInsert(defs, alloc);
+      typeSafeInsert(defs, siz);
+      typeSafeInsert(defs, aux);
+      s = mk<BADD>(s, mk<SELECT>(off, h));
+      Expr ss = mk<SELECT>(siz, al);
+
+      auto key = mkConst(mkTerm<string> ("k", efac), ty);
+      ExprVector tmp = {
+        mk<BULE>(mk<BSUB>(mk<BADD>(s, allSz), nums[1]), key),
+        mk<BULT>(key, mk<SELECT>(siz, al)),
+        mk<EQ>(mk<SELECT>(mk<SELECT>(mem, al), key), nums[0])
+      };
+
+      Expr sizeConstraint = mk<ITE>(
+        mk<EQ>(mk<SELECT>(aux, al), nums[1]),
+        mknary<EXISTS>(ExprVector{key->left(), conjoin(tmp, efac)}), // if cstring
+        mk<AND>(auxAss, mk<BULE>(mk<BADD>(s, allSz), ss)) // else
+      );
+
+      return mk<AND>(
+        mk<NEQ>(nums[0], al),
+        //mk<BSGE>(allSz, nums[0]),  // GF: to add when we get adequate types
+        sizeConstraint);
+    }
+
     Expr operator() (Expr exp)
     {
-      if (isOpX<EQ>(exp))
+      if (isOpX<FAPP>(exp))
+      {
+        auto name = lexical_cast<string>(exp->left()->left());
+        if (name == "state-r-ok" || name == "state-w-ok" ||
+            name == "state-rw-ok")
+          // TODO: update to use \exists
+          return assumeOks(exp->arg(2), exp->last(), name);
+        else if (name == "state-is-cstring")
+          return assumeCstring(exp->left()->arg(2), exp->arg(2));
+        else if (name == "state-r-ok-ass" || name == "state-w-ok-ass" ||
+                 name == "state-rw-ok-ass")
+          return assertAllocs(exp->arg(2), exp->last(), name);
+        else if (name == "state-is-cstring-ass")
+          return assertCstring(exp->arg(2));
+      }
+      else if (isOpX<EQ>(exp))
       {
         auto l = exp->left();
         if (isOpX<FAPP>(l))
@@ -144,14 +337,18 @@ namespace ufo
             if (isOpX<FAPP>(obj) && obj->left()->arity() > 2)
             {
               auto name = lexical_cast<string>(obj->left()->left());
-              if (name == "object-address"){
-                return updAllocs(l->arg(3), l->left()->arg(3), obj->last(), allSz);
+              if (name == "object-address")
+              {
+                // TODO: make sure that l->arg(3) also comes with "-p"
+                return updAllocs(l->arg(3), l->left()->arg(3),
+                      obj->last(), allSz,
+                      str.find("update-state-p") != string::npos);
               }
               else if (name.find("field-address") != string::npos)
               {
                 str = lexical_cast<string>(obj->last());
                 str = str.substr(1, str.length() - 2);
-                auto name = mkTerm<string>(str, exp->getFactory());
+                auto name = mkTerm<string>(str, efac);
                       // TODO: check type
                 auto field = mk<FAPP>(mk<FDECL>(name, ty));
 
@@ -162,7 +359,7 @@ namespace ufo
                 {
                   str = lexical_cast<string>(obj->right()->last());
                   str = str.substr(1, str.length() - 2);
-                  name = mkTerm<string>(str, exp->getFactory());
+                  name = mkTerm<string>(str, efac);
                         // TODO: check type
                   objj = mk<FAPP>(mk<FDECL>(name, ty));
                 }
@@ -193,6 +390,7 @@ namespace ufo
             {
               if(isOpX<BMUL>(obj->right()))
               {
+
                 Expr h = obj->left();
                 if (!isOpX<SELECT>(h)) h = getVarId(h);
 
@@ -253,9 +451,20 @@ namespace ufo
       {
         auto str = lexical_cast<string>(exp->left()->left());
         auto pos = str.find("evaluate");
-        if (pos != string::npos)
+        auto ela = str.find("element-address");
+
+        Expr cell = NULL;
+        if (ela != string::npos)
         {
-          auto obj = exp->arg(2);
+          if (exp->arity() == 4)
+            cell = mk<BMUL>(exp->arg(2), exp->arg(3));
+          else      // hack: the last arg should not be used
+            cell = mk<BMUL>(exp->arg(2), exp->arg(2));
+        }
+
+        if (pos != string::npos || ela != string::npos)
+        {
+          auto obj = exp->arg(pos != string::npos ? 2 : 1);
           if (find(names.begin(), names.end(), obj) != names.end())
           {
             // second iter: already added to vars, need to use offset
@@ -270,10 +479,13 @@ namespace ufo
           {
             str = lexical_cast<string>(obj->last());
             str = str.substr(1, str.length() - 2);
-            auto name = mkTerm<string>(str, exp->getFactory());
+            auto name = mkTerm<string>(str, efac);
             auto var = mk<FAPP>(mk<FDECL>(name, exp->left()->last()));
             varToDefs(defs, var);
-            return var;
+            if (cell == NULL)
+              return var;
+            else
+              return mk<BADD>(var, cell);
           }
           else if(isOpX<FAPP>(obj) &&
                  lexical_cast<string>(obj->left()->left()).
@@ -281,7 +493,7 @@ namespace ufo
           {
             str = lexical_cast<string>(obj->last());
             str = str.substr(1, str.length() - 2);
-            auto name = mkTerm<string>(str, exp->getFactory());
+            auto name = mkTerm<string>(str, efac);
                   // TODO: check type
             auto field = mk<FAPP>(mk<FDECL>(name, ty));
 
@@ -298,7 +510,7 @@ namespace ufo
             {
               str = lexical_cast<string>(obj->right()->last());
               str = str.substr(1, str.length() - 2);
-              name = mkTerm<string>(str, exp->getFactory());
+              name = mkTerm<string>(str, efac);
                     // TODO: check type
               objj = mk<FAPP>(mk<FDECL>(name, ty));
             }
