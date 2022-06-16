@@ -19,9 +19,14 @@ namespace ufo
     ExprSet srcTmp;
     ExprSet dstTmp;
 
+    ExprSet lin;
+
+    ExprVector origSrc;
+    ExprVector origDst;
     ExprMap origSrcVars;
 
     Expr body;
+    ExprVector nested;
 
     Expr srcRelation;
     Expr dstRelation;
@@ -30,21 +35,69 @@ namespace ufo
     bool isQuery;
     bool isInductive;
 
-    void assignVarsAndRewrite (ExprVector& src, ExprVector& invSrc,
-                               ExprVector& dst, ExprVector& invDst, ExprSet& lin)
+    void init (Expr fail)
     {
-      for (int i = 0; i < src.size(); i++)
+      if (srcRelation == NULL) srcRelation = mk<TRUE>(fail->getFactory());
+      isFact = isOpX<TRUE>(srcRelation);
+      isQuery = (dstRelation == fail);
+      isInductive = (srcRelation == dstRelation);
+    }
+
+    void assignVarsAndRewrite (map<Expr, ExprVector>& invSrc,
+                               map<Expr, ExprVector>& invDst)
+    {
+      for (int i = 0; i < origSrc.size(); i++)
       {
-        srcVars.push_back(invSrc[i]);
-        lin.insert(mk<EQ>(src[i], srcVars[i]));
-        origSrcVars[srcVars[i]] = src[i];
+        srcVars.push_back(invSrc[srcRelation][i]);
+        lin.insert(mk<EQ>(origSrc[i], srcVars[i]));
+        origSrcVars[srcVars[i]] = origSrc[i];
       }
 
-      for (int i = 0; i < dst.size(); i++)
+      for (int i = 0; i < origDst.size(); i++)
       {
-        dstVars.push_back(invDst[i]);
-        lin.insert(mk<EQ>(dst[i], dstVars[i]));
+        dstVars.push_back(invDst[dstRelation][i]);
+        lin.insert(mk<EQ>(origDst[i], dstVars[i]));
       }
+    }
+
+    bool splitBody (int debug = 0)
+    {
+      getConj (simplifyBool(body), lin);
+      for (auto c = lin.begin(); c != lin.end(); )
+      {
+        Expr cnj = *c;
+        if (isOpX<FAPP>(cnj))
+        {
+          Expr rel = cnj->left();
+          {
+            auto strName = lexical_cast<string>(rel->left());
+            if (contains(supportedPreds, strName) ||
+                contains(supportedPredsAss, strName))
+            {
+              if (debug > 0)
+                outs () << "hr.body \"" << body << "\" has "
+                        << strName << "\n";
+              ++c;
+            }
+            else
+            {
+              if (srcRelation != NULL)
+              {
+                errs () << "Nonlinear CHC is currently unsupported: ["
+                        << *srcRelation << " /\\ " << *rel->left() << " -> "
+                        << *dstRelation << "]\n";
+                exit(1);
+              }
+              srcRelation = rel->left();
+              for (auto it = cnj->args_begin()+1; it != cnj->args_end(); ++it)
+                origSrc.push_back(*it);
+              c = lin.erase(c);
+            }
+          }
+        }
+        else ++c;
+      }
+      return true;
     }
 
     void shrinkLocVars()
@@ -54,6 +107,28 @@ namespace ufo
         else it = locVars.erase(it);
     }
   };
+
+  struct updSeq
+  {
+    Expr& res;
+    bool& nested;
+    updSeq (Expr& _res, bool& _nested) : res(_res), nested(_nested) {}
+    Expr operator() (Expr exp)
+    {
+      if (!isOpX<FAPP>(exp)) return exp;
+      auto name = lexical_cast<string>(exp->left()->left());
+      if (name.find("update-state") == string::npos) return exp;
+      if (res == NULL) res = exp;
+      else nested = true;
+      return exp;
+    }
+  };
+
+  inline static void findUpd (Expr exp, Expr& res, bool& nested)
+  {
+    RW<updSeq> rw(new updSeq(res, nested));
+    dagVisit (rw, exp);
+  }
 
   class CHCs
   {
@@ -96,51 +171,16 @@ namespace ufo
       return false;
     }
 
-    bool splitBody (HornRuleExt& hr, ExprVector& srcVars, ExprSet& lin)
+    Expr getDeclByName(Expr a)
     {
-      getConj (simplifyBool(hr.body), lin);
-      for (auto c = lin.begin(); c != lin.end(); )
-      {
-        Expr cnj = *c;
-        if (isOpX<FAPP>(cnj))
-        {
-          Expr rel = cnj->left();
-          {
-            auto strName = lexical_cast<string>(rel->left());
-            if (contains(supportedPreds, strName) ||
-                contains(supportedPredsAss, strName))
-            {
-              if (debug > 0)
-                outs () << "hr.body \"" << hr.body << "\" has "
-                        << strName << "\n";
-              ++c;
-            }
-            else
-            {
-              if (hr.srcRelation != NULL)
-              {
-                errs () << "Nonlinear CHC is currently unsupported: ["
-                        << *hr.srcRelation << " /\\ " << *rel->left() << " -> "
-                        << *hr.dstRelation << "]\n";
-                exit(1);
-              }
-              hr.srcRelation = rel->left();
-              for (auto it = cnj->args_begin()+1; it != cnj->args_end(); ++it)
-                srcVars.push_back(*it);
-              c = lin.erase(c);
-            }
-          }
-        }
-        else ++c;
-      }
-      return true;
+      for (auto & d : decls)
+        if (d->left() == a) return d;
+      return NULL;
     }
 
     bool addedDecl(Expr a)
     {
-      for (auto & d : decls)
-        if (d->left() == a) return true;
-      return false;
+      return getDeclByName(a) != NULL;
     }
 
     void addDecl (Expr a)
@@ -262,9 +302,10 @@ namespace ufo
 
       for (auto &r: fp.m_rules)
       {
+        int chcNum = chcs.size();
         hasAnyArrays |= containsOp<ARRAY_TY>(r);
         chcs.push_back(HornRuleExt());
-        HornRuleExt& hr = chcs.back();
+        HornRuleExt& hr = chcs[chcNum];
         while (true)
         {
           Expr r1;
@@ -274,7 +315,8 @@ namespace ufo
             for (auto & e : eqs)
             {
               if (r1 != replaceAll(r1, e.first, e.second))
-                outs () << "rewriting " << (e.first)->left() << " -> " << (e.second)->left() << "\n";
+                outs () << "rewriting " << (e.first)->left()
+                        << " -> " << (e.second)->left() << "\n";
               r1 = replaceAll(r1, e.first, e.second);
             }
           }
@@ -305,10 +347,33 @@ namespace ufo
         {
           hr.body = r;
         }
+
+        while (true) // flattening
+        {
+          Expr res = NULL;
+          bool nested = false;
+          findUpd (chcs[chcNum].body, res, nested);
+          if (nested)
+          {
+            // GF: weird behavior of std::vector. when many (> 100) new elements
+            //     are pushed back, the `hr` link expires and need refreshments.
+            //     positional access (i.e., `chcs[chcNum]` solves it)
+            chcs.push_back(HornRuleExt());
+            chcs[chcNum].nested.push_back(res);
+            chcs[chcNum].body = replaceAll(chcs[chcNum].body, res, res->right());
+          }
+          else
+          {
+            if (debug > 0 && !chcs[chcNum].nested.empty())
+              outs () << "nesting level: " << chcs[chcNum].nested.size() << "\n";
+            break;
+          }
+        }
       }
 
       for (auto & hr : chcs)
       {
+        if (hr.body == NULL) continue;
         Expr head = hr.body->right();
         hr.body = hr.body->left();
         if (isOpX<FAPP>(head))
@@ -335,7 +400,7 @@ namespace ufo
           hr.dstRelation = head->left()->left();
 
           for (auto it = head->args_begin()+1; it != head->args_end(); ++it)
-            hr.dstVars.push_back(*it); // to be rewritten later
+            hr.origDst.push_back(*it); // to be rewritten later
         }
         else
         {
@@ -345,7 +410,6 @@ namespace ufo
         }
         hasBV |= containsOp<BVSORT>(hr.body);
       }
-
       if (debug > 0) outs () << "Reserved space for " << chcs.size()
                           << " CHCs and " << decls.size() << " declarations\n";
 
@@ -368,51 +432,74 @@ namespace ufo
       sizP = cloneVar(siz, mkTerm<string> ("_siz'", m_efac));
       auxP = cloneVar(siz, mkTerm<string> ("_aux'", m_efac));
 
-      ExprSet allVars = {alloc, mem, off, siz};
-
-      ExprVector names;
-      // the second loop is needed because we want to distunguish
-      // uninterpreted functions used as variables
-      // from relations to be synthesized
+      HornRuleExt & hrprev = *chcs.begin();
       for (auto it = chcs.begin(); it != chcs.end();)
       {
-        ExprVector origSrcSymbs, origDstSymbs;
-        ExprSet lin;
         HornRuleExt & hr = *it;
-        if (!splitBody(hr, origSrcSymbs, lin) ||
-              (hr.srcRelation != NULL && !addedDecl(hr.srcRelation)))
+        hr.splitBody();
+        if (hr.srcRelation == NULL || addedDecl(hr.srcRelation)) ++it;
+        else
         {
-          outs() << "Deleting vacuous CHC:\n"
-             << hr.srcRelation << " -> " << hr.dstRelation << "\n";
+          if (debug > 0)
+            outs() << "Deleting vacuous CHC:\n"
+                   << hr.srcRelation << " -> " << hr.dstRelation << "\n";
           it = chcs.erase(it);
           continue;
         }
-        else ++it;
 
-        if (hr.srcRelation == NULL) hr.srcRelation = mk<TRUE>(m_efac);
-
-        hr.isFact = isOpX<TRUE>(hr.srcRelation);
-        hr.isQuery = (hr.dstRelation == failDecl);
-        hr.isInductive = (hr.srcRelation == hr.dstRelation);
-
-        origDstSymbs = hr.dstVars;
-        hr.dstVars.clear();
-        hr.assignVarsAndRewrite (origSrcSymbs, invVars[hr.srcRelation],
-                                 origDstSymbs, invVarsPrime[hr.dstRelation], lin);
+        hr.init(failDecl);
+        hr.assignVarsAndRewrite (invVars, invVarsPrime);
         if (!hr.origSrcVars.empty())
           origSrcVars[hr.srcRelation] = hr.origSrcVars;
 
+        // repair for flattening
+        auto it2 = it;
+        string name = lexical_cast<string>(hr.srcRelation);
+        Expr d = getDeclByName(hr.srcRelation);
+        for (int i = 0; i < hr.nested.size(); i++)
+        {
+          Expr newName = mkTerm<string> (name + "_" + to_string(i), m_efac);
+          HornRuleExt & hr2 = *it2;
+          hr2.srcRelation = newName;
+          decls.insert(replaceAll(d, d->left(), newName));
+          invVars[hr2.srcRelation] = invVars[hr.srcRelation];
+          invVarsPrime[hr2.srcRelation] = invVarsPrime[hr.srcRelation];
+          hr2.dstRelation = hr.dstRelation;
+          hr.dstRelation = newName;
+          hr2.srcVars = hr.srcVars;
+          hr2.dstVars = hr.dstVars;
+          hr2.body = mk<EQ>(hr.nested[i], invVarsPrime[hr2.srcRelation][0]);
+          ++it2;
+        }
+      }
+
+      // small painless optimization
+      int sz = chcs.size();
+      eliminateVacDecls();
+      if (debug > 0)
+        outs () << "Vacuity elimination: " << sz << " -> " << chcs.size() << "\n";
+
+      // set encoding is here
+      ExprVector names;
+      for (auto & hr : chcs)
+      {
+        if (debug >= 3)
+          outs () << "\n\n PROC " << hr.srcRelation << " -> " << hr.dstRelation << "\n";
         ExprSet rlin;
         if (setEnc)
         {
-          for (auto & l : lin)
+          for (auto & l : hr.lin)
           {
+            if (debug >= 3)
+              outs () << "\n------\n  orig: " << l << "\n";
             Expr rl = l;
             if (!hr.isFact) rl = evalReplace(rl, hr.srcTmp,
               alloc, mem, off, siz, aux, allocP, memP, offP, sizP, auxP, names);
             rl = rewriteSet(rl, hr.dstTmp,
               alloc, mem, off, siz, aux, allocP, memP, offP, sizP, auxP, names);
             rl = typeRepair(rl);
+            if (debug >= 3)
+              outs () << "  conv: " << rl << "\n";
             if (!containsOp<AD_TY>(rl))
               getConj(rl, rlin);
           }
@@ -420,10 +507,11 @@ namespace ufo
         }
         else
         {
-          hr.body = conjoin(lin, m_efac);
+          hr.body = conjoin(hr.lin, m_efac);
         }
       }
 
+      ExprSet allVars = {alloc, mem, off, siz, aux};
       ExprVector allVarsV, allVarsVp;
       if (setEnc)   // set-encoding
       {
@@ -569,6 +657,8 @@ namespace ufo
         return false;
       }
 
+      if (debug > 0)
+        outs () << "Vacuity elimination: " << sz << " -> " << chcs.size() << "\n";
       if (debug >= 0)
       {
         outs () << "  Simplified CHCs:\n";
@@ -657,6 +747,48 @@ namespace ufo
       return eliminateTrivTrueOrFalse();     // recursive call
     }
 
+
+    // lighter version (compare to the coming `eliminateDecls`)
+    void eliminateVacDecls()
+    {
+      bool toRepeat = false;
+      for (auto it = decls.begin(); it != decls.end(); )
+      {
+        auto & d = *it;
+        vector<int> outgs;
+        bool toDel = true;
+        for (int i = 0; i < chcs.size(); i++)
+        {
+          if (chcs[i].dstRelation == d->left())
+          {
+            toDel = false;
+            break;
+          }
+          if (chcs[i].srcRelation == d->left())
+            outgs.push_back(i);
+        }
+        if (toDel)
+        {
+          if (debug > 0)
+          {
+             outs () << "  Removing decl " << d->left() << "\n"
+                                         << "  and the following CHCs:\n";
+             for (int i = 0; i < outgs.size(); i++)
+             {
+               outs () << "    " << chcs[outgs[i]].srcRelation << " -> "
+                                 << chcs[outgs[i]].dstRelation << "\n";
+             }
+          }
+          for (int i = outgs.size() - 1; i >= 0; i--)
+            chcs.erase(chcs.begin() + outgs[i]);
+          it = decls.erase(it);
+          toRepeat = true;
+        }
+        else ++it;
+      }
+      if (toRepeat) eliminateVacDecls();
+    }
+
     bool eliminateDecls()
     {
       pair<int,int> preElim = {chcs.size() - toEraseChcs.size(), decls.size()};
@@ -692,7 +824,8 @@ namespace ufo
         }
 
         if (src.size() > 0 && dst.size() > 0 && emptyIntersect(src, dst) &&
-            emptyIntersect(simplCHCs, src) && emptyIntersect(simplCHCs, dst))
+            emptyIntersect(simplCHCs, src) && emptyIntersect(simplCHCs, dst) &&
+            (src.size() == 1 || dst.size() == 1))
         {
           if (declToRemove != NULL)
             if (declToRemove->arity() > (*d)->arity())
