@@ -37,7 +37,7 @@ namespace ufo
 
     void init (Expr fail)
     {
-      if (srcRelation == NULL) srcRelation = mk<TRUE>(fail->getFactory());
+      if (srcRelation == NULL) srcRelation = mk<TRUE>(body->getFactory());
       isFact = isOpX<TRUE>(srcRelation);
       isQuery = (dstRelation == fail);
       isInductive = (srcRelation == dstRelation);
@@ -348,6 +348,9 @@ namespace ufo
           hr.body = r;
         }
 
+        if (lexical_cast<string>(hr.body).find("element-address") != string::npos)
+          continue;
+
         while (true) // flattening
         {
           Expr res = NULL;
@@ -425,13 +428,13 @@ namespace ufo
       off = mkConst(off, mk<ARRAY_TY> (s, s));
       siz = mkConst(siz, mk<ARRAY_TY> (s, s));
       aux = mkConst(aux, mk<ARRAY_TY> (s, s));
-      alloc = mkConst(alloc, mk<ARRAY_TY> (s, s));
       allocP = cloneVar(alloc, mkTerm<string> ("_alloc'", m_efac));
       memP = cloneVar(mem, mkTerm<string> ("_mem'", m_efac));
       offP = cloneVar(off, mkTerm<string> ("_off'", m_efac));
       sizP = cloneVar(siz, mkTerm<string> ("_siz'", m_efac));
       auxP = cloneVar(siz, mkTerm<string> ("_aux'", m_efac));
 
+      if (failDecl == NULL) failDecl = mk<FALSE>(m_efac);
       HornRuleExt & hrprev = *chcs.begin();
       for (auto it = chcs.begin(); it != chcs.end();)
       {
@@ -448,6 +451,7 @@ namespace ufo
         }
 
         hr.init(failDecl);
+
         hr.assignVarsAndRewrite (invVars, invVarsPrime);
         if (!hr.origSrcVars.empty())
           origSrcVars[hr.srcRelation] = hr.origSrcVars;
@@ -481,11 +485,13 @@ namespace ufo
 
       // set encoding is here
       ExprVector names;
+      vector<HornRuleExt> tmp;
       for (auto & hr : chcs)
       {
         if (debug >= 3)
           outs () << "\n\n PROC " << hr.srcRelation << " -> " << hr.dstRelation << "\n";
         ExprSet rlin;
+        ExprSet checks;
         if (setEnc)
         {
           for (auto & l : hr.lin)
@@ -498,10 +504,22 @@ namespace ufo
             rl = rewriteSet(rl, hr.dstTmp,
               alloc, mem, off, siz, aux, allocP, memP, offP, sizP, auxP, names);
             rl = typeRepair(rl);
+            rl = simplifyBool(rl);
             if (debug >= 3)
               outs () << "  conv: " << rl << "\n";
             if (!containsOp<AD_TY>(rl))
+            {
               getConj(rl, rlin);
+
+              // memsafety checks generation
+              ExprSet selstors;
+              filter (rl, IsSelect (), inserter(selstors, selstors.begin()));
+              filter (rl, IsStore (), inserter(selstors, selstors.begin()));
+              for (auto & s : selstors)
+                if (isOpX<SELECT>(s->left()) && mem == s->left()->left())
+                  checks.insert(mk<BULT>(s->right(),
+                    mk<SELECT>(siz, mk<SELECT>(alloc, s->left()->right()))));
+            }
           }
           hr.body = conjoin(rlin, m_efac);
         }
@@ -509,7 +527,20 @@ namespace ufo
         {
           hr.body = conjoin(hr.lin, m_efac);
         }
+
+        // memsafety checks insertion
+        for (auto & c : checks)
+        {
+          tmp.push_back(hr);
+          tmp.back().isQuery = true;
+          tmp.back().isInductive = false;
+          tmp.back().isFact = false;
+          tmp.back().dstRelation = failDecl;
+          tmp.back().dstVars.clear();
+          tmp.back().body = mk<NEG>(c);
+        }
       }
+      for (auto & c : tmp) chcs.push_back(c);
 
       ExprSet allVars = {alloc, mem, off, siz, aux};
       ExprVector allVarsV, allVarsVp;
@@ -582,7 +613,7 @@ namespace ufo
             {
               if (find(hr.dstTmp.begin(), hr.dstTmp.end(), allVarsV[i])
                                                             == hr.dstTmp.end())
-                lin.insert(mk<EQ>(allVarsV[i], allVarsVp[i]));
+                lin.insert(mk<EQ>(allVarsVp[i], allVarsV[i]));
             }
           }
           hr.body = conjoin(lin, m_efac);
@@ -659,6 +690,28 @@ namespace ufo
 
       if (debug > 0)
         outs () << "Vacuity elimination: " << sz << " -> " << chcs.size() << "\n";
+
+      set<int> redundandQs;
+      for (int i = 0; i < chcs.size(); i++)
+      {
+        if (!chcs[i].isQuery) continue;
+        if (contains(redundandQs, i)) continue;
+        for (int j = i + 1; j < chcs.size(); j++)
+        {
+          if (!chcs[j].isQuery) continue;
+          if (chcs[i].srcRelation != chcs[j].srcRelation) continue;
+          if (chcs[i].body != chcs[j].body) continue;
+          redundandQs.insert(j);
+        }
+      }
+
+      for (auto rit = redundandQs.rbegin(); rit != redundandQs.rend(); rit++)
+      {
+        if (debug > 0)
+          outs () << "  removing redundant query #" << *rit << "\n";
+        chcs.erase(chcs.begin() + *rit);
+      }
+
       if (debug >= 0)
       {
         outs () << "  Simplified CHCs:\n";
@@ -920,6 +973,7 @@ namespace ufo
           to_string(glob_ind++), m_efac);
         newVars.push_back(cloneVar(d->locVars[i], new_name));
       }
+
       mergedBody = mk<AND>(replaceAll(d->body, n->dstVars, newVars), mergedBody);
       n->locVars = newVars;
       n->locVars.insert(n->locVars.end(), s->locVars.begin(), s->locVars.end());
@@ -1360,14 +1414,27 @@ namespace ufo
       return weakenForHardVars(tmp, hr->srcVars);
     }
 
+    int getQum()
+    {
+      int n = 0;
+      for (auto & c : chcs) if (c.isQuery) n++;
+      return n;
+    }
+
+    // TODO: repair cycles
     void wtoSort()
     {
+      wtoCHCs.clear();
+      wtoDecls.clear();
+
+      // workaround, until cycles are repaired
+      for (auto & c : chcs) wtoCHCs.push_back(&c);
+      for (auto & c : decls) wtoDecls.push_back(c);
+
+      cycles.clear();
+      prefixes.clear();
       hasCycles();
-      if (wtoCHCs.size() > 0)
-      {
-        outs () << "Already sorted\n";
-        return;
-      }
+      return;
 
       int r1 = 0;
 
@@ -1409,7 +1476,6 @@ namespace ufo
         r1 = r2;
         r2 = wtoDecls.size();
       }
-
       assert(wtoCHCs.size() == chcs.size());
 
       // filter wtoDecls
@@ -1420,7 +1486,7 @@ namespace ufo
       }
     }
 
-    void print (bool full = false, bool dump_cfg = false)
+    void print (bool full = false, bool dump_cfg = false, string name = "chc")
     {
       std::ofstream enc_chc;
       if (dump_cfg)
@@ -1445,7 +1511,7 @@ namespace ufo
         if (full && hr.srcVars.size() > 0)
         {
           outs () << " (";
-          pprint(hr.srcVars);
+          pprint(hr.srcVars, 0, false);
           outs () << ")";
         }
         else outs () << "[#" << hr.srcVars.size() << "]";
@@ -1455,7 +1521,7 @@ namespace ufo
         if (full && hr.dstVars.size() > 0)
         {
           outs () << " (";
-          pprint(hr.dstVars);
+          pprint(hr.dstVars, 0, false);
           outs () << ")";
         }
         else outs () << "[#" << hr.dstVars.size() << "]";
@@ -1480,14 +1546,14 @@ namespace ufo
         enc_chc <<("}");
         enc_chc.close();
         // this needs a graphiz package installed:
-        // system("dot -Tpdf -o chc.pdf chc.dot");
+        // system(string("dot -Tpdf -o " + name + ".pdf chc.dot").c_str());
       }
     }
 
-    void serialize ()
+    void serialize (string name = "chc")
     {
       std::ofstream enc_chc;
-      enc_chc.open("chc.smt2");
+      enc_chc.open(name + ".smt2");
       enc_chc << "(set-logic HORN)\n";
       for (auto & d : decls)
       {
