@@ -22,6 +22,9 @@ namespace ufo
             "state-w-ok-ass", "state-is-cstring-ass"
             };
 
+  static Expr selRewrite (Expr exp, ExprVector& names, Expr alloc,
+                              function<Expr(void*, Expr)> f, void* obj);
+
   inline static void varToDefs(ExprSet& defs, Expr var)
   {
     if (isOpX<FAPP>(var) && var->left()->arity() == 2)
@@ -36,9 +39,9 @@ namespace ufo
     Expr alloc, mem, off, siz, allocP, memP, offP, sizP, aux, auxP, ty;
          // alloc and aux should be initially zeroes
          // then aux (v) == 1 if v is cstring,
-         //      aux (v) == 2 if v is read-only
-         //      aux (v) == 3 if v is write-only
-         //      aux (v) == 4 if v is read and write
+         //      aux (v) == 2 if v is read-ok
+         //      aux (v) == 3 if v is write-ok
+         //      aux (v) == 4 if v is read-and-write-ok
     ExprVector nums;
 
     SetDecoder (ExprSet& _defs,
@@ -53,8 +56,50 @@ namespace ufo
         for (int i = 0; i <= 4; i++) nums.push_back(bvnum(mkMPZ(i, efac), ty));
       };
 
+    Expr getVarByName (Expr name, Expr type)
+    {
+      auto str = lexical_cast<string>(name);
+      if (str.find("\"") != string::npos)
+        str = str.substr(1, str.length() - 2);
+      auto varname = mkTerm<string>(str, efac);
+      return mk<FAPP>(mk<FDECL>(varname, type));
+    }
+
+    Expr addNoname()
+    {
+      int i = names.size() + 1;
+      auto var = mkConst(mkTerm<string> ("noname_alloc" +
+                 lexical_cast<string>(i), efac), ty);
+      names.push_back(var);
+      return var;
+    }
+
     Expr getVarId (Expr var)
     {
+      if (!containsOp<FAPP>(var))
+      {
+        return mkConst(mkTerm<string> ("nondet", efac), ty);
+      }
+      outs().flush();
+      if (isOpX<FAPP>(var))
+      {
+        auto str = lexical_cast<string>(var->left());
+        if (var->arity() > 2)
+        {
+          if (str.find("element-address") != string::npos &&
+              isOpX<BCONCAT>(var->right()))
+            return mkConst(mkTerm<string> ("nondet", efac), ty);
+          assert(0 && "Cannot get an ID of non-variable expr");
+        }
+        if (str.find("object-address") != string::npos)
+          assert(0 && "Cannot get an ID of object-address");
+      }
+
+      if (isOpX<SELECT>(var)) // not a var at all
+        return var;
+
+      assert(isOpX<FAPP>(var) && var->arity() == 1);
+
       int i;
       for (i = 0; i < names.size(); i++)
         if (names[i] == var) break;
@@ -63,6 +108,63 @@ namespace ufo
         names.push_back(var);
 
       return bvnum(mkMPZ(i + 1, efac), ty);
+    }
+
+    static Expr getVarIdWr (void* arg, Expr e)
+    {
+      SetDecoder* that = (SetDecoder*)arg;
+      return that->getVarId(e);
+    }
+
+    Expr concatFieldNames(Expr obj)
+    {
+      string name = isOpX<FAPP>(obj) ?
+        lexical_cast<string>(obj->left()->left()) : "";
+      if (name.find("field-address") != string::npos)
+      {
+        auto var = getVarByName(obj->last(), ty);
+        Expr res = concatFieldNames(obj->right());
+        if (res == NULL) // just var name
+          return var;
+        else if (isOpX<FAPP>(res))
+        {
+          auto tmp = mkTerm<string>(lexical_cast<string>(res) + "::" +
+                                    lexical_cast<string>(var), efac);
+          return replaceAll(res, res->left()->left(),
+                  mkTerm<string>(lexical_cast<string>(res) + "::" +
+                 lexical_cast<string>(var), efac));
+        }
+        else assert(0);
+      }
+      else
+        return NULL;
+      assert(0 && "Unsupported field type");
+      return NULL;
+    }
+
+    Expr getObj(Expr obj)
+    {
+      string name = isOpX<FAPP>(obj) ?
+        lexical_cast<string>(obj->left()->left()) : "";
+      if (name.find("field-address") != string::npos)
+        return getObj(obj->right());
+      else if (isOpX<SELECT>(obj))
+      {
+        assert(isOpX<SELECT>(obj->left()) && mem == obj->left()->left());
+        return mk<SELECT>(mem, obj);
+      }
+      else
+        return obj;
+    }
+
+    Expr getMemField(Expr exp)
+    {
+      if (isOpX<BEXTRACT>(exp))
+        return getMemField(exp->last());
+      if (mem == exp->left()->left())
+        return exp->left()->right();
+      outs () << "Unable to detect mem field: " << exp << "\n";
+      return NULL;
     }
   };
 
@@ -78,66 +180,68 @@ namespace ufo
 
     Expr assumeOks(Expr obj, Expr allSz, string fname)
     {
-      Expr var;
-      Expr offs;
-      if (isOpX<BADD>(obj))
+      Expr var, offs, h;
+      ExprVector assms;
+      if (isOpX<SELECT>(obj))
       {
-        var = obj->left();
+        var = obj;
+        offs = nums[0];
+        assms = {mk<EQ>(var, getVarId(addNoname()))};
+      }
+      else if (isOpX<FAPP>(obj) && lexical_cast<string>(
+          obj->left()->left()).find("field-address") != string::npos)
+      {
+        auto field = concatFieldNames(obj);
+        Expr objj = getObj(obj);
+        assert(0 && "Assume over fields not supported");
+      }
+      else if (isOpX<BADD>(obj))
+      {
         assert(isOpX<BMUL>(obj->right()));
+        var = obj->left();
         offs = obj->right()->left();
       }
       else
       {
-        auto str = lexical_cast<string>(obj);
-        if (str.find("\"") != string::npos)
-          str = str.substr(1, str.length() - 2);
-        auto name = mkTerm<string>(str, efac);
-        var = mk<FAPP>(mk<FDECL>(name, ty));
+        var = getVarByName(obj, ty);
         offs = nums[0];
       }
 
-      Expr h = getVarId(var);
-      Expr auxUpd;
+      h = getVarId(var);
       if (fname == "state-r-ok")
-        auxUpd = mk<EQ>(auxP, mk<STORE>(aux, h, nums[2]));
+        assms.push_back(mk<EQ>(auxP, mk<STORE>(aux, h, nums[2])));
       else if (fname == "state-w-ok")
-        auxUpd = mk<EQ>(auxP, mk<STORE>(aux, h, nums[3]));
+        assms.push_back(mk<EQ>(auxP, mk<STORE>(aux, h, nums[3])));
       else if (fname == "state-rw-ok")
-        auxUpd = mk<EQ>(auxP, mk<STORE>(aux, h, nums[4]));
-      else
-        auxUpd = mk<TRUE>(efac);
+        assms.push_back(mk<EQ>(auxP, mk<STORE>(aux, h, nums[4])));
 
       typeSafeInsert(defs, alloc);
       typeSafeInsert(defs, siz);
+      typeSafeInsert(defs, off);
       typeSafeInsert(defs, aux);
-      return mk<AND>(
-          auxUpd,
-          mk<AND>(mk<EQ>(allocP, mk<STORE>(alloc, h, h)),
-                  mk<EQ>(sizP, mk<STORE>(siz, h, allSz))),
-          mk<EQ>(offP, mk<STORE>(off, h, offs))
-        );
+      assms.push_back(mk<EQ>(allocP, mk<STORE>(alloc, h, h)));
+      assms.push_back(mk<EQ>(sizP, mk<STORE>(siz, h, allSz)));
+      assms.push_back(mk<EQ>(offP, mk<STORE>(off, h, offs)));
+      return mknary<AND>(assms);
     }
 
     Expr updAllocs(Expr arg, Expr ty, Expr obj, Expr allSz, bool ptr)
     {
-      auto str = lexical_cast<string>(obj);
-      if (str.find("\"") != string::npos)
-        str = str.substr(1, str.length() - 2);
-      auto name = mkTerm<string>(str, efac);
-      Expr var = mk<FAPP>(mk<FDECL>(name, ty));
-
+      Expr var = getVarByName(obj, ty);
       if (allSz != NULL)
       {
+        // TODO: check types if isOpX<BMUL>(allSz)
         Expr h = getVarId(var);
 
         typeSafeInsert(defs, alloc);
         typeSafeInsert(defs, siz);
         typeSafeInsert(defs, off);
-        return mk<AND>(
-            mk<AND>(mk<EQ>(allocP, mk<STORE>(alloc, h, h)),
-                    mk<EQ>(sizP, mk<STORE>(siz, h, allSz))),
-            mk<EQ>(offP, mk<STORE>(off, h, nums[0]))
-          );
+        typeSafeInsert(defs, aux);
+        return mknary<AND>(ExprVector{
+           mk<EQ>(allocP, mk<STORE>(alloc, h, h)),
+           mk<EQ>(sizP, mk<STORE>(siz, h, allSz)),
+           mk<EQ>(offP, mk<STORE>(off, h, nums[0])),
+           mk<EQ>(auxP, mk<STORE>(aux, h, nums[4]))});
       }
       else
       {
@@ -145,8 +249,24 @@ namespace ufo
         Expr argTmp = isOpX<BADD>(arg) ? arg->left() : arg;
         if (ptr)
         {
-          Expr k = getVarId(argTmp);
           Expr h = getVarId(var);
+          if (isOpX<FAPP>(argTmp) &&
+              lexical_cast<string>(argTmp->left()->left()) == "object-address")
+          {
+            typeSafeInsert(defs, alloc);
+            Expr k = getVarId(getVarByName(argTmp->last(), ty));
+            Expr m = mk<SELECT>(alloc, k);
+            return
+              mk<EQ>(allocP, mk<STORE>(alloc, h, m));
+          }
+          else if (isOpX<FAPP>(argTmp) &&
+              lexical_cast<string>(argTmp->left()->left()).find(
+                    "field-address") != string::npos) // field copy here
+          {
+            assert(0 && "Field pointers not supported");
+          }
+
+          Expr k = getVarId(argTmp);
           if (isOpX<BADD>(arg))
           {
             Expr offVal;
@@ -154,24 +274,28 @@ namespace ufo
               offVal = arg->right()->left();
             else
               offVal = arg->right();
-            // TODO: compute proper offset based on BMUL;
 
+            // TODO: compute proper offset based on BMUL;
             offs = mk<EQ>(offP, mk<STORE>(off, h,
                                 mk<BADD>(mk<SELECT>(off, k), offVal)));
           }
           else
-          {
             offs = mk<EQ>(offP, mk<STORE>(off, h, mk<SELECT>(off, k)));
-          }
 
-          typeSafeInsert(defs, alloc);
           typeSafeInsert(defs, off);
-          return mk<AND>(offs,
-            mk<EQ>(allocP, mk<STORE>(alloc, h, mk<SELECT>(alloc, k))));
+
+          if (h == k) return offs;
+          else
+          {
+            typeSafeInsert(defs, alloc);
+            return mk<AND>(
+              offs,
+              mk<EQ>(allocP, mk<STORE>(alloc, h, mk<SELECT>(alloc, k))));
+          }
         }
 
         varToDefs(defs, var);
-        name = mkTerm<string>(lexical_cast<string>(name) + "'", efac);
+        Expr name = mkTerm<string>(lexical_cast<string>(var) + "'", efac);
         var = mk<FAPP>(mk<FDECL>(name, ty));
         return mk<EQ>(var, arg);
       }
@@ -179,13 +303,7 @@ namespace ufo
 
     Expr assumeCstring(Expr ty, Expr obj)
     {
-      auto str = lexical_cast<string>(obj);
-      if (str.find("\"") != string::npos)
-      {
-        str = str.substr(1, str.length() - 2);
-      }
-      auto name = mkTerm<string>(str, efac);
-      Expr var = mk<FAPP>(mk<FDECL>(name, ty));
+      Expr var = getVarByName(obj, ty);
       typeSafeInsert(defs, alloc);
       typeSafeInsert(defs, aux);
       typeSafeInsert(defs, off);
@@ -203,7 +321,7 @@ namespace ufo
           mk<EQ>(auxP, mk<STORE>(aux, h, nums[1])),
           mk<EQ>(offP, mk<STORE>(off, h, nums[0])),
           mknary<EXISTS>(ExprVector{key->left(), conjoin(assm, efac)})}
-        );
+      );
     }
 
     Expr assertCstring(Expr obj)
@@ -251,12 +369,26 @@ namespace ufo
         var = obj->left();
         s = obj->right();
       }
+      else if (isOpX<FAPP>(obj) && lexical_cast<string>
+                        (obj->left()->left()) == "object-address")
+      {
+        var = getVarByName(obj->last(), ty);
+        s = nums[0];
+      }
+      else if (isOpX<FAPP>(obj) && lexical_cast<string>
+                   (obj->left()->left()).find("field-address") != string::npos)
+      {
+        auto field = concatFieldNames(obj);
+        Expr objj = getObj(obj);
+        assert(0 && "assert over fields not supported");
+        var = getVarByName(obj->last(), ty);
+        s = nums[0];
+      }
       else
       {
         var = obj;
         s = nums[0];
       }
-
       Expr h = getVarId(var);
       Expr auxAss;
       Expr al = mk<SELECT>(alloc, h);
@@ -322,22 +454,41 @@ namespace ufo
         {
           auto str = lexical_cast<string>(l->left()->left());
           auto pos = str.find("update-state");
-          if (pos == string::npos) pos = str.find("allocate");   // TODO: split
-          if (pos == string::npos) pos = str.find("reallocate"); // TODO: split
-          if (pos != string::npos)
+          auto posa = str.find("allocate");
+          auto posd = str.find("deallocate");
+
+          if ((pos != string::npos || posa != string::npos) &&
+               posd == string::npos)
           {
             Expr obj = l->arg(2);
             Expr allSz = NULL;
-            if (l->arity() > 3 && isOpX<FAPP>(l->arg(3)) &&
-                (lexical_cast<string>(l->arg(3)->left()->left()) == "allocate" ||
-                 lexical_cast<string>(l->arg(3)->left()->left()) == "reallocate"))
+            string fname = "";
+            if (l->arity() > 3 && isOpX<FAPP>(l->arg(3)))
             {
-              allSz = l->arg(3)->last();
+              fname = lexical_cast<string>(l->arg(3)->left()->left());
+              if (fname == "allocate" || fname == "reallocate")
+              {
+                allSz = l->arg(3)->last();
+              }
             }
             if (isOpX<FAPP>(obj) && obj->left()->arity() > 2)
             {
               auto name = lexical_cast<string>(obj->left()->left());
-              if (name == "object-address")
+              if (fname == "reallocate")
+              {
+                assert(name == "object-address");
+                auto var = getVarId(l->arg(3)->arg(2));
+                auto objj = getVarByName(obj->last(), ty);
+                auto varr = getVarId(objj);
+
+                typeSafeInsert(defs, siz);
+                typeSafeInsert(defs, alloc);
+                return mk<AND>(
+                  mk<EQ>(sizP, mk<STORE>(siz, mk<SELECT>(alloc, var), allSz)),
+                  mk<EQ>(allocP, mk<STORE>(alloc, varr, mk<SELECT>(alloc, var)))
+                );
+              }
+              else if (name == "object-address" && fname != "reallocate")
               {
                 // TODO: make sure that l->arg(3) also comes with "-p"
                 return updAllocs(l->arg(3), l->left()->arg(3),
@@ -346,39 +497,66 @@ namespace ufo
               }
               else if (name.find("field-address") != string::npos)
               {
-                str = lexical_cast<string>(obj->last());
-                str = str.substr(1, str.length() - 2);
-                auto name = mkTerm<string>(str, efac);
-                      // TODO: check type
-                auto field = mk<FAPP>(mk<FDECL>(name, ty));
+                Expr wr = l->arg(3);
+                wr = selRewrite(wr, names, alloc, getVarIdWr, this);
 
-                Expr objj;
-                if (isOpX<FAPP>(obj->right()) && obj->right()->left()->arity() == 2)
-                  objj = obj->right();
+                if (isOpX<FAPP>(wr) && lexical_cast<string>  // struct copy
+                                  (wr->left()->left()) == "object-address")
+                {
+                  wr = getVarByName(wr->last(), ty);
+                  wr = getVarId(wr);
+                  wr = mk<SELECT>(mk<SELECT>(mem,
+                                    mk<SELECT>(alloc, wr)), nums[0]);
+                }
+                auto field = concatFieldNames(obj);
+                Expr objj = getObj(obj);
+
+                Expr addNew = mk<TRUE>(efac);
+                Expr k = getVarId(field);
+                typeSafeInsert(defs, mem);
+
+                if (isOpX<SELECT>(objj))
+                {
+                  assert(!isOpX<SELECT>(field));
+                  assert(objj->left() == mem);
+
+                  return mk<EQ>(memP, mk<STORE>(mem,
+                              objj->last(), mk<STORE>(objj, k, wr)));
+                }
+                Expr h;
+                if (isOpX<FAPP>(objj) &&
+                    lexical_cast<string>(objj->left()->left())
+                                    == "object-address")
+                {
+                  Expr fmem = getMemField(wr);
+                  objj = getVarByName(objj->last(), ty);
+                  h = getVarId(objj);
+                  typeSafeInsert(defs, alloc);
+                  typeSafeInsert(defs, off);
+                  ExprVector eqs = {mk<EQ>(allocP, mk<STORE>(alloc, h, h)),
+                         mk<EQ>(offP, mk<STORE>(off, h, nums[0]))};
+                  if (fmem != NULL)
+                  {
+                    // uncomment to add the r/w-ok preservation:
+                    // typeSafeInsert(defs, aux);
+
+                    eqs.push_back(mk<EQ>(sizP,
+                                    mk<STORE>(siz, h, mk<SELECT>(siz, fmem))));
+                    // mk<EQ>(auxP, mk<STORE>(aux, h, mk<SELECT>(aux, fmem))),
+                    typeSafeInsert(defs, siz);
+                  }
+
+                  addNew = mknary<AND>(eqs);
+                }
                 else
                 {
-                  str = lexical_cast<string>(obj->right()->last());
-                  str = str.substr(1, str.length() - 2);
-                  name = mkTerm<string>(str, efac);
-                        // TODO: check type
-                  objj = mk<FAPP>(mk<FDECL>(name, ty));
+                  h = getVarId(objj);
+                  h = mk<SELECT>(alloc, h);
                 }
 
-                Expr h = getVarId(objj);
-                Expr k = getVarId(field);
-
-                Expr toWrite = l->arg(3);
-                if (contains(names, toWrite))
-                {
-                  toWrite = getVarId(toWrite);
-                }
-                typeSafeInsert(defs, mem);
-                typeSafeInsert(defs, objj);
-
-                h = mk<SELECT>(alloc, h);
-
-                return mk<EQ>(memP, mk<STORE>(mem,
-                        h, mk<STORE>(mk<SELECT>(mem, h), k, toWrite)));
+                return mk<AND>(addNew,
+                        mk<EQ>(memP, mk<STORE>(mem, h,
+                                     mk<STORE>(mk<SELECT>(mem, h), k, wr))));
               }
               else
               {
@@ -388,24 +566,22 @@ namespace ufo
             }
             else if (isOpX<BADD>(obj))
             {
-              if(isOpX<BMUL>(obj->right()))
-              {
+              Expr ind = isOpX<BMUL>(obj->right()) ?
+                              obj->right()->left() : obj->right();
+              Expr h = obj->left();
 
-                Expr h = obj->left();
-                if (!isOpX<SELECT>(h)) h = getVarId(h);
+              // TODO: add similar asserts everywhere
+              assert(width(typeOf(l->arg(3))) == isOpX<BMUL>(obj->right()) ?
+                     lexical_cast<int>(toMpz(obj->right()->right())) * 8 : 8);
 
-                Expr t = mk<BADD>(mk<SELECT>(off, h), obj->right()->left());
-                Expr b =mk<SELECT>(mem, mk<SELECT>(alloc, h));
-                typeSafeInsert(defs, mem);
-                return mk<EQ>(memP, mk<STORE>(mem,
-                  mk<SELECT>(alloc, h),
-                  mk<STORE>(b, t, l->arg(3))));
-              }
-              else
-              {
-                // unsupported for now
-                outs () << "Ignoring the \"" << obj << "\" constraint\n";
-              }
+              if (!isOpX<SELECT>(h)) h = getVarId(h);
+
+              Expr t = mk<BADD>(mk<SELECT>(off, h), ind);
+              Expr b =mk<SELECT>(mem, mk<SELECT>(alloc, h));
+              typeSafeInsert(defs, mem);
+              return mk<EQ>(memP, mk<STORE>(mem,
+                mk<SELECT>(alloc, h),
+                mk<STORE>(b, t, l->arg(3))));
             }
             else
             {
@@ -418,6 +594,16 @@ namespace ufo
                 mk<SELECT>(alloc, h),
                 mk<STORE>(b, t, l->arg(3))));
             }
+          }
+          if (posd != string::npos)
+          {
+            // dealloc
+            auto h = getVarId(l->last());
+            typeSafeInsert(defs, mem);
+            auto nondetMem = mkConst(mkTerm<string> ("nondetMem", efac),
+                  typeOf(mem)->last());
+            return mk<EQ>(memP,
+              mk<STORE>(mem, mk<SELECT>(alloc, h), nondetMem));
           }
         }
       }
@@ -445,6 +631,12 @@ namespace ufo
         _alloc, _mem, _off, _siz, _aux,
         _allocP, _memP, _offP, _sizP, _auxP, _names) {};
 
+    Expr extract(Expr t, Expr e)
+    {
+      if (t == ty) return e;
+      return bv::extract (width(t)-1, 0, e);
+    }
+
     Expr operator() (Expr exp)
     {
       if (isOpX<FAPP>(exp))
@@ -465,6 +657,7 @@ namespace ufo
         if (pos != string::npos || ela != string::npos)
         {
           auto obj = exp->arg(pos != string::npos ? 2 : 1);
+          Expr type = exp->left()->last();
           if (find(names.begin(), names.end(), obj) != names.end())
           {
             // second iter: already added to vars, need to use offset
@@ -472,54 +665,52 @@ namespace ufo
             Expr t = mk<SELECT>(off, h);
             typeSafeInsert(defs, mem);
             typeSafeInsert(defs, off);
-            return mk<SELECT>(mk<SELECT>(mem, mk<SELECT>(alloc, h)), t);
+            return extract(type,
+              mk<SELECT>(mk<SELECT>(mem, mk<SELECT>(alloc, h)), t));
           }
           else if(isOpX<FAPP>(obj) &&
                  lexical_cast<string>(obj->left()->left()) == "object-address")
           {
-            str = lexical_cast<string>(obj->last());
-            str = str.substr(1, str.length() - 2);
-            auto name = mkTerm<string>(str, efac);
-            auto var = mk<FAPP>(mk<FDECL>(name, exp->left()->last()));
+            auto var = getVarByName(obj->last(), type);
             varToDefs(defs, var);
-            if (cell == NULL)
+            if (isOpX<BOOL_TY>(type))
+            {
               return var;
+            }
+            if (cell == NULL)
+              return extract(type, var);
             else
-              return mk<BADD>(var, cell);
+              return extract(type, mk<BADD>(var, cell));
           }
           else if(isOpX<FAPP>(obj) &&
                  lexical_cast<string>(obj->left()->left()).
                     find("field-address") != string::npos)
           {
-            str = lexical_cast<string>(obj->last());
-            str = str.substr(1, str.length() - 2);
-            auto name = mkTerm<string>(str, efac);
-                  // TODO: check type
-            auto field = mk<FAPP>(mk<FDECL>(name, ty));
+            Expr field = concatFieldNames(obj);
+            Expr objj = getObj(obj);
 
-            Expr objj;
-            if (isOpX<SELECT>(obj->right())) // nested
+            if (isOpX<FAPP>(objj) &&
+                lexical_cast<string>(objj->left()->left())
+                                == "object-address")
             {
-              objj = obj->right();
-              Expr k = getVarId(field);
-              return mk<SELECT>(mk<SELECT>(mem, mk<SELECT>(alloc, objj)), k);
+              objj = getVarByName(objj->last(), ty);
             }
-            if (isOpX<FAPP>(obj->right()) && obj->right()->left()->arity() == 2)
-              objj = obj->right();
-            else
+
+            if (isOpX<SELECT>(objj))
             {
-              str = lexical_cast<string>(obj->right()->last());
-              str = str.substr(1, str.length() - 2);
-              name = mkTerm<string>(str, efac);
-                    // TODO: check type
-              objj = mk<FAPP>(mk<FDECL>(name, ty));
+              assert(!isOpX<SELECT>(field));
+              assert(objj->left() == mem);
+
+              auto h = getVarId(field);
+              return mk<SELECT>(objj, h);
             }
 
             Expr h = getVarId(objj);
             Expr k = getVarId(field);
             typeSafeInsert(defs, mem);
             typeSafeInsert(defs, objj);
-            return mk<SELECT>(mk<SELECT>(mem, mk<SELECT>(alloc, h)), k);
+            return extract(type,
+              mk<SELECT>(mk<SELECT>(mem, mk<SELECT>(alloc, h)), k));
           }
           else if (isOpX<BADD>(obj))
           {
@@ -529,18 +720,20 @@ namespace ufo
 
             typeSafeInsert(defs, mem);
             Expr t;
-            if(isOpX<BMUL>(obj->right())) t = obj->right()->left();
+            if (isOpX<BMUL>(obj->right())) t = obj->right()->left();
             else t = obj->right();
 
-            return mk<SELECT>(mk<SELECT>(mem, mk<SELECT>(alloc, toRead)), t);
+            Expr res = mk<SELECT>(mk<SELECT>(mem, mk<SELECT>(alloc, toRead)), t);
+            return extract(type, res);
           }
           else if (isOpX<SELECT>(obj))
           {
             Expr toRead = obj;
 
             if (contains(names, toRead)) toRead = getVarId(toRead);
-            return mk<SELECT>(mk<SELECT>(mem, mk<SELECT>(alloc, toRead)),
-                                              mk<SELECT>(off, toRead));
+            return extract(type,
+              mk<SELECT>(mk<SELECT>(mem, mk<SELECT>(alloc, toRead)),
+                                              mk<SELECT>(off, toRead)));
           }
         }
       }
@@ -559,31 +752,51 @@ namespace ufo
   }
 
 
+  template <typename OP> static Expr rep(Expr exp)
+  {
+    // `isOpX<OP>(exp)` should hold at most once,
+    // so types and widths are computed at most once too
+    if (isOpX<OP>(exp) && exp->arity() == 2)
+    {
+      Expr t1 = typeOf(exp->left());
+      Expr t2 = typeOf(exp->right());
+      if (isOpX<BVSORT>(t1) && isOpX<BVSORT>(t2))
+      {
+        int w1 = width(t1);
+        int w2 = width(t2);
+        if (w1 > w2)
+          exp = mk<OP>(exp->left(), sext(exp->right(), w1));
+        else if (w2 > w1)
+          exp = mk<OP>(sext(exp->left(), w2), exp->right());
+      }
+    }
+    return exp;
+  }
+
   struct TypeRep
   {
     TypeRep () {}
     Expr operator() (Expr exp)
     {
-      // TODO: extend
-      if (isOpX<EQ>(exp) && typeOf(exp->left()) != typeOf(exp->right()))
-      {
-        int w1 = width(typeOf(exp->left()));
-        int w2 = width(typeOf(exp->right()));
-        if (w1 > w2)
-          exp = mk<EQ>(exp->left(), sext(exp->right(), w1));
-        else
-          exp = mk<EQ>(sext(exp->left(), w2), exp->right());
-      }
-
-      if (isOpX<NEQ>(exp) && typeOf(exp->left()) != typeOf(exp->right()))
-      {
-        int w1 = width(typeOf(exp->left()));
-        int w2 = width(typeOf(exp->right()));
-        if (w1 > w2)
-          exp = mk<NEQ>(exp->left(), sext(exp->right(), w1));
-        else
-          exp = mk<NEQ>(sext(exp->left(), w2), exp->right());
-      }
+      exp = rep<EQ>(exp);
+      exp = rep<NEQ>(exp);
+      exp = rep<BULT>(exp);
+      exp = rep<BSLT>(exp);
+      exp = rep<BULE>(exp);
+      exp = rep<BSLE>(exp);
+      exp = rep<BUGT>(exp);
+      exp = rep<BSGT>(exp);
+      exp = rep<BUGE>(exp);
+      exp = rep<BSGE>(exp);
+      exp = rep<BAND>(exp);
+      exp = rep<BOR>(exp);
+      exp = rep<BADD>(exp);
+      exp = rep<BSUB>(exp);
+      exp = rep<BMUL>(exp);
+      exp = rep<BUDIV>(exp);
+      exp = rep<BSDIV>(exp);
+      exp = rep<BUREM>(exp);
+      exp = rep<BSREM>(exp);
 
       if (isOpX<SELECT>(exp) && typeOf(exp->left())->left() != typeOf(exp->right()))
       {
@@ -620,6 +833,52 @@ namespace ufo
   {
     RW<TypeRep> rw(new TypeRep());
     return dagVisit (rw, exp);
+  }
+
+  struct SelRewr
+  {
+    function<Expr(void*, Expr)> f;
+    ExprVector& names;
+    Expr alloc;
+    void* obj;
+
+    SelRewr (function<Expr(void*, Expr)> _f, ExprVector& _names, Expr _alloc,
+              void* _obj): f(_f), names(_names), alloc(_alloc), obj(_obj) {}
+    Expr operator() (Expr exp)
+    {
+      if (contains(names, exp))
+        return mk<SELECT>(alloc, f(obj, exp));
+      return exp;
+    }
+  };
+
+  inline static Expr selRewrite (Expr exp, ExprVector& names, Expr alloc,
+                    function<Expr(void*, Expr)> f, void* obj)
+  {
+    RW<SelRewr> rw(new SelRewr(f, names, alloc, obj));
+    return dagVisit (rw, exp);
+  }
+
+  struct updSeq
+  {
+    Expr& res;
+    bool& nested;
+    updSeq (Expr& _res, bool& _nested) : res(_res), nested(_nested) {}
+    Expr operator() (Expr exp)
+    {
+      if (!isOpX<FAPP>(exp)) return exp;
+      auto name = lexical_cast<string>(exp->left()->left());
+      if (name.find("update-state") == string::npos) return exp;
+      if (res == NULL) res = exp;
+      else nested = true;
+      return exp;
+    }
+  };
+
+  inline static void findUpd (Expr exp, Expr& res, bool& nested)
+  {
+    RW<updSeq> rw(new updSeq(res, nested));
+    dagVisit (rw, exp);
   }
 }
 

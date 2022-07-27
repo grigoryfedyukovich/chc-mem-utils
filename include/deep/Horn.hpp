@@ -108,28 +108,6 @@ namespace ufo
     }
   };
 
-  struct updSeq
-  {
-    Expr& res;
-    bool& nested;
-    updSeq (Expr& _res, bool& _nested) : res(_res), nested(_nested) {}
-    Expr operator() (Expr exp)
-    {
-      if (!isOpX<FAPP>(exp)) return exp;
-      auto name = lexical_cast<string>(exp->left()->left());
-      if (name.find("update-state") == string::npos) return exp;
-      if (res == NULL) res = exp;
-      else nested = true;
-      return exp;
-    }
-  };
-
-  inline static void findUpd (Expr exp, Expr& res, bool& nested)
-  {
-    RW<updSeq> rw(new updSeq(res, nested));
-    dagVisit (rw, exp);
-  }
-
   class CHCs
   {
     private:
