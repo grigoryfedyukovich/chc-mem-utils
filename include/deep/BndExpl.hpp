@@ -88,7 +88,8 @@ namespace ufo
       {
         for (auto a : ruleManager.outgs[src])
         {
-          if (ruleManager.chcs[a].dstRelation == dst)
+          if (ruleManager.chcs[a].dstRelation == dst &&
+              !contains(foundCexes, a))
           {
             vector<int> newtrace = trace;
             newtrace.push_back(a);
@@ -206,7 +207,9 @@ namespace ufo
       }
     }
 
-    tribool exploreTraces(int cur_bnd, int bnd, bool print = false)
+    vector<int> foundCexes;
+    tribool exploreTraces(int cur_bnd, int bnd, bool print = false,
+                                  bool toRemBad = true)
     {
       if (ruleManager.chcs.size() == 0)
       {
@@ -232,6 +235,7 @@ namespace ufo
         bool toBreak = false;
         for (auto &a : traces)
         {
+          if (contains(foundCexes, a.back())) continue;
           ExprVector ssa;
           getSSA(a, ssa);
           int sz;
@@ -245,9 +249,15 @@ namespace ufo
               for (auto & b : a)
                 outs () << " (" << b << ") -> " << ruleManager.chcs[b].dstRelation;
               outs () << "\n";
+              pprint(ruleManager.chcs[a.back()].body);
             }
-            toBreak = true;
-            break;
+            if (toRemBad)
+              foundCexes.push_back(a.back());
+            else
+            {
+              toBreak = true;
+              break;
+            }
           }
           else
           {
@@ -260,8 +270,16 @@ namespace ufo
 
       if (debug || print)
       {
-        if (indeterminate(res)) outs () << "unknown\n";
-        else if (res) outs () << "Counterexample of length " << (cur_bnd - 1) << " found\n";
+        if (indeterminate(res))
+        {
+          errs () << "unknown\n";
+          exit(0);
+        }
+        else if (res)
+        {
+          outs () << "Counterexample of length " << (cur_bnd - 1) << " found\n";
+          pprint(u.getModel());
+        }
         else if (ruleManager.hasCycles())
           outs () << "No counterexample found up to length " << cur_bnd << "\n";
         else

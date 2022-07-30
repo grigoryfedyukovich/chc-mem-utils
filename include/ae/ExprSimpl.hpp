@@ -19,7 +19,7 @@ namespace ufo
     return -1;
   }
 
-  template<typename T> static bool contains(vector<T>& v, T e) {
+  template<typename T, typename R> static bool contains(R& v, T e) {
     return find(v.begin(), v.end(), e) != v.end();
   }
 
@@ -72,6 +72,12 @@ namespace ufo
     ExprVector bv;
     filter (b, IsConst (), inserter(bv, bv.begin()));
     return emptyIntersect(a, bv);
+  }
+
+  static Expr conjoin(ExprMap& conjs, ExprFactory &efac){
+    ExprSet a;
+    for (auto & v : conjs) a.insert(mk<EQ>(v.first, v.second));
+    return conjoin(a, efac);
   }
 
   // if at the end disjs is empty, then a == true
@@ -286,7 +292,10 @@ namespace ufo
   {
     if (isIntConst(a) || isOpX<MPZ>(a) || isOp<FDECL>(a) ||
         is_bvnum(a) || is_bvconst(a) || isOpX<ARRAY_TY>(a)) return;
-    if (isNumeric(a) && !isOpX<ITE>(a))
+    if ((isNumeric(a) ||
+      (isOpX<BEXTRACT>(a) || isOpX<BSEXT>(a)     // need a subset of isBv(a)
+      || (isOpX<SELECT>(a) && isOpX<BVSORT>(typeOf(a))))
+      ) && !isOpX<ITE>(a))
     {
       bool hasNoNumeric = false;
       for (unsigned i = 0; i < a->arity(); i++)
@@ -1281,11 +1290,14 @@ namespace ufo
         if (isOpX<TRUE>(exp->right()))
           return mk<TRUE>(efac);
 
-        if (isOpX<FALSE>(exp->left()))
-          return mk<TRUE>(efac);
-
         if (isOpX<FALSE>(exp->right()))
           return mkNeg(exp->left());
+
+        if (isOpX<TRUE>(exp->left()))
+          return exp->right();
+
+        if (isOpX<FALSE>(exp->left()))
+          return mk<TRUE>(efac);
 
 //        return simplifyBool(mk<OR>(
 //                 mkNeg(exp->left()),
@@ -1355,7 +1367,7 @@ namespace ufo
           if (lhs == mkNeg(rhs)) return mk<TRUE>(efac);
           if (rhs == mkNeg(lhs)) return mk<TRUE>(efac);
         }
-        return disjoin (newDsjs, efac);
+        return distribDisjoin(newDsjs, efac);
       }
 
       if (isOpX<AND>(exp))
@@ -1414,6 +1426,7 @@ namespace ufo
   };
 
   static Expr simplifyArr (Expr exp);
+  static bool evalSelectEq(Expr e);
 
   struct SimplifyArrExpr
   {
@@ -1458,6 +1471,8 @@ namespace ufo
 
       if (isOpX<EQ>(exp))
       {
+        if (evalSelectEq(exp))
+          return mk<TRUE>(exp->getFactory());
         if (isOpX<STORE>(exp->left()) && exp->right() == exp->left()->left())
         {
           return simplifyArr(mk<EQ>(mk<SELECT>(exp->right(), exp->left()->right()), exp->left()->last()));
@@ -2177,6 +2192,8 @@ namespace ufo
       return boolConst(new_name);
     else if (isOpX<ARRAY_TY>(t))
       return mkConst(new_name, mk<ARRAY_TY> (t->left(), t->right()));
+    else if (isOpX<BVSORT>(t))
+      return mkConst(new_name, t);
 
     else return NULL;
   }
@@ -4575,7 +4592,14 @@ namespace ufo
 
   void pprint(Expr exp, int inden, bool upper);
 
-  template<typename Range> static void pprint(Range& exprs, int inden = 0)
+  void pprint(ExprMap & e)
+  {
+    for (auto & a : e)
+      outs () << "  " << a.first << " -> " << a.second << "\n";
+  }
+
+  template<typename Range> static void pprint(
+        Range& exprs, int inden = 0, int lineBreak = true)
   {
     for (auto it = exprs.begin(); it != exprs.end(); ++it)
     {
@@ -4583,6 +4607,7 @@ namespace ufo
       outs() << (inden > 0 ? "\n" :
         (std::next(it) != exprs.end()) ? ", " : "");
     }
+    if (lineBreak && inden == 0) outs () << "\n";
   }
 
   inline void pprint(Expr exp, int inden = 0, bool upper = true)
@@ -4616,18 +4641,6 @@ namespace ufo
       outs () << string(inden, ' ') << "[!\n";
       flas.insert(exp->left());
     }
-    else if ((isOpX<NEQ>(exp) || isOpX<EQ>(exp)) && containsOp<STORE>(exp))
-    {
-      pprint(exp->left(), inden, false);
-      if (containsOp<STORE>(exp->left()))
-        outs () << "\n" << string(inden, ' ');
-      if (isOpX<NEQ>(exp)) outs () << " != ";
-      else outs () << " = ";
-      if (containsOp<STORE>(exp->right()))
-        outs () << "\n";
-      pprint(exp->right(), inden + 2, false);
-      return;
-    }
     else if (isOpX<STORE>(exp))
     {
       outs () << string(inden, ' ') << "store(\n";
@@ -4647,6 +4660,16 @@ namespace ufo
       if (upper) outs() << "\n";
       return;
     }
+    else if (isOpX<IMPL>(exp))
+    {
+      outs () << string(inden, ' ') << "[";
+      pprint(exp->left(), inden);
+      outs () << string(inden + 2, ' ') << "=>\n";
+      pprint(exp->right(), inden + 4);
+      outs () << string(inden, ' ') << "]";
+      if (upper) outs() << "\n";
+      return;
+    }
     if (flas.empty()) outs () << string(inden, ' ') << exp;
     else
     {
@@ -4655,6 +4678,7 @@ namespace ufo
     }
     if (upper) outs() << "\n";
   }
+
 }
 
 #endif

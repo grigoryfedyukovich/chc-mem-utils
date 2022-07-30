@@ -135,9 +135,10 @@ namespace ufo
     int glob_ind = 0;
     ExprSet origVrs;
     map<Expr, ExprMap> origSrcVars;
+    bool mems;
 
-    CHCs(ExprFactory &efac, EZ3 &z3, int d = false) :
-      u(efac), m_efac(efac), m_z3(z3), hasAnyArrays(false), debug(d) {};
+    CHCs(ExprFactory &efac, EZ3 &z3, bool _mems = false, int d = false) :
+      u(efac), m_efac(efac), m_z3(z3), mems(_mems), hasAnyArrays(false), debug(d) {};
 
     bool isFapp (Expr e)
     {
@@ -507,15 +508,18 @@ namespace ufo
         }
 
         // memsafety checks insertion
-        for (auto & c : checks)
+        if (mems)
         {
-          tmp.push_back(hr);
-          tmp.back().isQuery = true;
-          tmp.back().isInductive = false;
-          tmp.back().isFact = false;
-          tmp.back().dstRelation = failDecl;
-          tmp.back().dstVars.clear();
-          tmp.back().body = mk<NEG>(c);
+          for (auto & c : checks)
+          {
+            tmp.push_back(hr);
+            tmp.back().isQuery = true;
+            tmp.back().isInductive = false;
+            tmp.back().isFact = false;
+            tmp.back().dstRelation = failDecl;
+            tmp.back().dstVars.clear();
+            tmp.back().body = mk<NEG>(c);
+          }
         }
       }
       for (auto & c : tmp) chcs.push_back(c);

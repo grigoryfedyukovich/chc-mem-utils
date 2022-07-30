@@ -428,7 +428,7 @@ namespace ufo
 
     void initializeDecl(Expr invDecl)
     {
-      if (printLog) outs () << "\nINITIALIZE PREDICATE " << invDecl << "\n====================\n";
+      if (printLog > 2) outs () << "\nINITIALIZE PREDICATE " << invDecl << "\n====================\n";
 //      assert (invDecl->arity() > 2);
       assert(decls.size() == invNumber);
       assert(sfs.size() == invNumber);
@@ -447,7 +447,7 @@ namespace ufo
       for (int i = 0; i < ruleManager.invVars[invDecl].size(); i++)
       {
         Expr var = ruleManager.invVars[invDecl][i];
-        // if (sf.addVar(var))  // FIXME: 
+        // if (sf.addVar(var))  // FIXME:
         {
           invarVars[invNumber][i] = var;
           invarVarsShort[invNumber].push_back(var);
@@ -696,6 +696,7 @@ namespace ufo
         Expr res = simplifyArithm(conjoin(lms, m_efac));
         u.print(res);
         outs () << ")\n";
+        outs().flush();
         assert(hasOnlyVars(res, ruleManager.invVars[rel]));
       }
     }

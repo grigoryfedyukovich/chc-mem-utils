@@ -55,7 +55,9 @@ int main (int argc, char ** argv)
   const char *OPT_DEBUG = "--debug";
   const char *OPT_HELP = "--help";
   const char *OPT_MEM = "--mem";
+  const char *OPT_MSAF = "--memsafety";
   const char *OPT_TO = "--to";
+  const char *OPT_SER = "--serialize";
 
   if (getBoolValue(OPT_HELP, false, argc, argv) || argc == 1)
   {
@@ -72,6 +74,8 @@ int main (int argc, char ** argv)
 
   int debug = getIntValue(OPT_DEBUG, 0, argc, argv);
   bool mem = getBoolValue(OPT_MEM, false, argc, argv);
+  bool serial = getBoolValue(OPT_SER, false, argc, argv);
+  bool memsaf = getBoolValue(OPT_MSAF, false, argc, argv);
   int to = getIntValue(OPT_TO, 1000, argc, argv);
 
   //get names
@@ -94,6 +98,6 @@ int main (int argc, char ** argv)
     }
   }
 
-  process(string(argv[argc-1]), var_ids, debug, mem, to);
+  process(string(argv[argc-1]), var_ids, memsaf, serial, debug, mem, to);
   return 0;
 }
