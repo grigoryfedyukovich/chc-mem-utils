@@ -726,7 +726,7 @@ namespace ufo
     return isNonlinear(e);
   }
 
-  inline static Expr coreQE(Expr fla, ExprSet& vars)
+  inline static Expr coreQE(Expr fla, ExprSet& vars, bool weaken)
   {
     if (!emptyIntersect(fla, vars) &&
         !containsOp<FORALL>(fla) && !containsOp<EXISTS>(fla) && !qeUnsupported(fla))
@@ -735,25 +735,45 @@ namespace ufo
       if (ae.solve()) return ae.getValidSubset();
       else return mk<TRUE>(fla->getFactory());
     }
+    else
+    {
+      ExprSet conjs;
+      getConj(fla, conjs);
+      ExprSet deps;
+      for (auto it = conjs.begin(); it != conjs.end(); )
+      {
+        if (emptyIntersect(*it, vars)) ++it;
+        else
+        {
+          deps.insert(*it);
+          it = conjs.erase(it);
+        }
+      }
+      if (deps.size() == 1 && weaken)
+      {
+        // heuristic
+        return conjoin(conjs, fla->getFactory());
+      }
+    }
     return fla;
   };
 
-  inline static Expr coreQE(Expr fla, ExprVector& vars)
+  inline static Expr coreQE(Expr fla, ExprVector& vars, bool weaken)
   {
     ExprSet varsSet;
     for (auto & v : vars) varsSet.insert(v);
-    return coreQE(fla, varsSet);
+    return coreQE(fla, varsSet, weaken);
   }
 
   template<typename Range> static Expr eliminateQuantifiers(Expr fla, Range& qVars,
-                                       bool doArithm = true, bool doCore = true)
+                                       bool doArithm = true, bool doCore = true, bool weaken = false)
   {
     if (qVars.size() == 0) return fla;
     ExprSet dsjs, newDsjs;
     getDisj(fla, dsjs);
     if (dsjs.size() > 1)
     {
-      for (auto & d : dsjs) newDsjs.insert(eliminateQuantifiers(d, qVars));
+      for (auto & d : dsjs) newDsjs.insert(eliminateQuantifiers(d, qVars, true, true, weaken));
       return disjoin(newDsjs, fla->getFactory());
     }
 
@@ -766,38 +786,54 @@ namespace ufo
     Expr tmp = simpEquivClasses(hardVars, cnjs, fla->getFactory());
     tmp = simpleQE(tmp, qVars);
     if (doCore)
-      return coreQE(tmp, qVars);
+      return coreQE(tmp, qVars, weaken);
     else
       return tmp;
   }
 
-  template<typename Range> static Expr eliminateQuantifiersRepl(Expr fla, Range& vars)
+  template<typename Range> static Expr eliminateQuantifiersRepl(Expr fla,
+                                              Range& vars, bool weaken = false)
   {
     ExprFactory &efac = fla->getFactory();
     SMTUtils u(efac);
     ExprSet complex;
     findComplexNumerics(fla, complex);
-    ExprMap repls;
-    ExprSet varsCond; varsCond.insert(vars.begin(), vars.end());
+    ExprSet varsCond;
+    varsCond.insert(vars.begin(), vars.end());
+    ExprVector from;
+    ExprVector to;
     for (auto & a : complex)
     {
-      Expr repl = bind::intConst(mkTerm<string>
-                                 ("__repl_" + lexical_cast<string>(repls.size()), efac));
-      repls[a] = repl;
-      for (auto & v : vars) if (contains(a, v)) varsCond.erase(v);
+      auto repl = cloneVar(a, mkTerm<string>
+                      ("__repl_" + lexical_cast<string>(from.size()), efac));
+      from.push_back(a);
+      to.push_back(repl);
+      for (auto & v : vars)
+        if (contains(a, v))
+          varsCond.insert(repl);
     }
-    Expr condTmp = replaceAll(fla, repls);
-    Expr tmp = eliminateQuantifiers(condTmp, varsCond);
-    tmp = replaceAllRev(tmp, repls);
-    return eliminateQuantifiers(tmp, vars);
+
+    Expr condTmp = replaceAll(fla, from, to);
+    Expr tmp = eliminateQuantifiers(condTmp, varsCond, true, true, weaken);
+    tmp = replaceAll(tmp, to, from);
+
+    return eliminateQuantifiers(tmp, vars, true, true, weaken);
   }
 
-  inline static Expr keepQuantifiers(Expr fla, ExprVector& vars)
+  inline static Expr keepQuantifiers(Expr fla, ExprVector& vars, bool weaken = false)
   {
     ExprSet varsSet;
     filter (fla, bind::IsConst (), inserter(varsSet, varsSet.begin()));
     minusSets(varsSet, vars);
-    return eliminateQuantifiers(fla, varsSet);
+    return eliminateQuantifiers(fla, varsSet, true, true, weaken);
+  }
+
+  inline static Expr keepQuantifiersReplWeak(Expr fla, ExprVector& vars)
+  {
+    ExprSet varsSet;
+    filter (fla, bind::IsConst (), inserter(varsSet, varsSet.begin()));
+    minusSets(varsSet, vars);
+    return eliminateQuantifiersRepl(fla, varsSet, true);
   }
 
   inline static Expr keepQuantifiersRepl(Expr fla, ExprVector& vars)

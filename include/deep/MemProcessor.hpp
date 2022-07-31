@@ -72,7 +72,6 @@ namespace ufo
 
           for (int i = 0; i < 3 /*weakeningPriorities.size() */; i++)
           {
-            outs() << " weaken round " << i << "\n";
             if (weaken (invNum, candidates[invNum], vals, hr, sf,
                 (*weakeningPriorities[i]), i > 0))
               break;
@@ -675,6 +674,246 @@ namespace ufo
       }
     }
 
+    void addToCandidates(int ind, Expr e, int debugMarker)
+    {
+      if (find(candidates[ind].begin(), candidates[ind].end(), e) !=
+               candidates[ind].end()) return;
+      Expr rel = decls[ind];
+      Expr lms = conjoin(sfs[ind].back().learnedExprs, m_efac);
+      if (u.implies(lms, e)) return;
+
+      assert(hasOnlyVars(e, ruleManager.invVars[rel]));
+      candidates[ind].push_back(e);
+      if (printLog >= 2)
+        outs () << "adding to candidates: " << rel << " / "
+                << debugMarker << ": " << e << "\n";
+    }
+
+
+    bool simplifyCHCs()
+    {
+      if (printLog) outs() << "  Lemma-based CHC simplification\n";
+      bool changed = false;
+      for(auto & c : ruleManager.chcs)
+      {
+        auto b = c.body;
+        if (!c.isFact)
+        {
+          // find implications
+          ExprSet bodySeps, bodyImpls;
+          ExprMap bodyEqs;
+          getConj(b, bodySeps);
+          for (auto it = bodySeps.begin(); it != bodySeps.end(); )
+          {
+            if (isOpX<IMPL>(*it))
+            {
+              bodyImpls.insert(*it);
+              it = bodySeps.erase(it);
+            }
+            else if (isOpX<EQ>(*it) && contains(c.dstVars, (*it)->left()))
+            {
+              bodyEqs[(*it)->left()] = (*it)->right();
+              it = bodySeps.erase(it);
+            }
+            else ++it;
+          }
+
+          auto ind = getVarIndex(c.srcRelation, decls);
+          auto lems = sfs[ind].back().learnedExprs;
+
+          for (auto & s : bodyImpls)
+          {
+            if (u.implies(conjoin(lems, m_efac), s->left()))
+            {
+              bodySeps.insert(s->right());
+              changed = true;
+            }
+            else if (!u.implies(conjoin(lems, m_efac), mkNeg(s->left())))
+            {
+              bodySeps.insert(s);
+            }
+          }
+
+          ExprSet newBody;
+          for (auto & c : bodySeps)
+          {
+            auto d = replaceAll(c, bodyEqs);
+            if (c != d) changed = true;
+            newBody.insert(d);
+          }
+          for (auto & m : bodyEqs)
+          {
+            newBody.insert(mk<EQ>(m.first, m.second));
+          }
+          newBody.insert(lems.begin(), lems.end());
+
+          b = conjoin(newBody, m_efac);
+        }
+
+        while(true)
+        {
+          ExprSet disjs, simplDisjs;
+          getDisj(b, disjs);
+          bool anyProg = false;
+          for (auto & d : disjs)
+          {
+            auto s = simplifyBool(simplifyArr(simplifyBV(d)));
+            s = simpleQE(s, c.locVars);
+            anyProg |= d != s;
+            simplDisjs.insert(s);
+          }
+          if (anyProg)
+          {
+            b = disjoin(simplDisjs, m_efac);
+            changed = true;
+          }
+          else break;
+        }
+        c.body = b;
+
+        if (printLog >= 3)
+        {
+          outs () << "   simplified CHC " <<
+                     c.srcRelation << " -> " << c.dstRelation << "\n";
+          ExprSet cnj;
+          getConj(b, cnj);
+          outs () << " // preconds:\n";
+          for (auto it = cnj.begin(); it != cnj.end(); )
+            if (hasOnlyVars(*it, c.srcVars))
+            {
+              outs () << "  " << *it << "\n";
+              it = cnj.erase(it);
+            }
+            else ++it;
+
+          for (auto it = cnj.begin(); it != cnj.end(); )
+            if (hasOnlyVars(*it, c.dstVars))
+            {
+              outs () << "  " << *it << "\n";
+              it = cnj.erase(it);
+            }
+            else ++it;
+          outs () << " // mixed:\n";
+          pprint(cnj, 2);
+        }
+      }
+      return changed;
+    }
+
+    void preproAdder(Expr a, ExprVector& dst, ExprVector& dstpr,
+                     int indDst, int debugMarker)
+    {
+      auto b = rewriteSelectStore(a);
+      b = u.removeITE(b);
+      b = keepQuantifiersReplWeak(b, dstpr);
+      ExprSet cnjs;
+      getConj(b, cnjs);
+      for (auto bb : cnjs)
+      {
+        if (hasOnlyVars(bb, dstpr))
+        {
+          if (dst != dstpr) bb = replaceAll(bb, dstpr, dst);
+          addToCandidates(indDst, bb, debugMarker);
+        }
+      }
+    }
+
+    void processFact(HornRuleExt& c)
+    {
+      int indDst = getVarIndex(c.dstRelation, decls);
+
+      ExprSet bodyCnjs;
+      getConj(c.body, bodyCnjs);
+
+      for (auto a : bodyCnjs)
+      {
+        preproAdder(a, ruleManager.invVars[c.dstRelation],
+                       ruleManager.invVarsPrime[c.dstRelation], indDst, 0);
+      }
+    }
+
+    void processQuery(HornRuleExt& c)
+    {
+      int indSrc = getVarIndex(c.srcRelation, decls);
+
+      ExprSet bodyCnjs;
+      getConj(c.body, bodyCnjs);
+
+      for (auto a : bodyCnjs)
+      {
+        preproAdder(mkNeg(a), ruleManager.invVars[c.srcRelation],
+                              ruleManager.invVars[c.srcRelation], indSrc, 1);
+      }
+    }
+
+    void processInd(HornRuleExt& c)
+    {
+      int indDst = getVarIndex(c.dstRelation, decls);
+
+      ExprSet bodyCnjs;
+      getConj(c.body, bodyCnjs);
+
+      for (auto a : bodyCnjs)
+      {
+        preproAdder(a, ruleManager.invVars[c.dstRelation],
+                       ruleManager.invVarsPrime[c.dstRelation], indDst, 2);
+      }
+    }
+
+    void processProp(HornRuleExt& c)
+    {
+      int indSrc = getVarIndex(c.srcRelation, decls);
+      int indDst = getVarIndex(c.dstRelation, decls);
+
+      for (auto a : sfs[indSrc].back().learnedExprs)
+      {
+        addToCandidates(indDst, a, 3);
+      }
+      for (auto a : sfs[indDst].back().learnedExprs)
+      {
+        addToCandidates(indSrc, a, 4);
+      }
+      for (auto a : candidates[indSrc])
+      {
+        addToCandidates(indDst, a, 5);
+      }
+      for (auto a : candidates[indDst])
+      {
+        addToCandidates(indSrc, a, 6);
+      }
+    }
+
+    tribool invSyn(int b = 0)
+    {
+      auto affected = simplifyCHCs();
+      if (b > 0 && !affected) return indeterminate;
+
+      for(int chc = 0; chc < ruleManager.chcs.size(); chc++)
+      {
+        auto & c = ruleManager.chcs[chc];
+        if (printLog)
+          outs () << "  Synthesize [" << b << "] for CHC "
+                  << c.srcRelation << " -> " << c.dstRelation << "\n";
+
+        if (c.isFact) processFact(c);
+        if (c.isQuery) processQuery(c);
+        if (c.isInductive) processInd(c);
+        if (!c.isQuery && !c.isFact && !c.isInductive) processProp(c);
+      }
+
+      if (multiHoudini(ruleManager.allCHCs))
+      {
+        assignPrioritiesForLearned();
+        if(checkAllLemmas())
+        {
+          printSolution();
+          return true;
+        }
+      }
+
+      return invSyn(b + 1);
+    }
+
     void simplifyCHCstruct()
     {
       vector<int> simplCHCs;
@@ -781,7 +1020,11 @@ namespace ufo
       ruleManager.print(false, true, "chc_optim");
       return;
     }
-    assert(0 && "Solving to come soon\n");
+
+    if (ds.invSyn())
+      errs() << "sat\n";
+    else
+      errs() << "unknown\n";
   }
 }
 
