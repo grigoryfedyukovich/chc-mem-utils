@@ -12,11 +12,11 @@ namespace ufo
   {
     public:
 
-    MemProcessor (ExprFactory &m_efac, EZ3 &z3, CHCs& r,
+    MemProcessor (ExprFactory &m_efac, EZ3 &z3, CHCs& r, bool _dat,
                                       map<int, string>& _v, int debug, int to) :
       RndLearnerV3 (m_efac, z3, r, to, false, false, 0, 1, false, 0, false,
                 false, true, false, 0, false, false, to, debug),
-                varIds(_v) {}
+                dat(_dat), varIds(_v) {}
 
     map<Expr, int> allocMap, offMap, sizMap, memMap;
     map<Expr, ExprSet> allocVals;
@@ -25,6 +25,8 @@ namespace ufo
     Expr memTy, allocTy, defAlloc;
     map<int, string>& varIds;
     Expr lastDecl = NULL;
+    ExprSet offsetsSizes;
+    bool dat;
 
     bool multiHoudini (vector<HornRuleExt*> worklist, bool recur = true,
       bool fastExit = false)
@@ -883,11 +885,59 @@ namespace ufo
       }
     }
 
+    void processBounds()
+    {
+      for (auto & decl : ruleManager.decls)
+      {
+        auto d = decl->left();
+        int ind = getVarIndex(d, decls);
+        auto sv = ruleManager.invVars[d][sizMap[d]];
+        auto ov = ruleManager.invVars[d][offMap[d]];
+        auto ty = typeOf(sv)->right();
+        Expr zero = bvnum(mkMPZ(0, m_efac), ty);
+
+        for (auto & al : aliases[d])
+        {
+          addToCandidates(ind, mk<BUGT>(mk<SELECT>(sv, al.first), zero), 12);
+
+          for (auto & v : ruleManager.invVars[d])
+            if (is_bvconst(v))
+              addToCandidates(ind,
+                mk<EQ>(bv::sext(v, width(ty)), mk<SELECT>(sv, al.first)), 13);
+
+          for (auto & a : al.second)
+          {
+            offsetsSizes.insert(mk<SELECT>(ov, a));
+            offsetsSizes.insert(mk<SELECT>(sv, al.first));
+
+            addToCandidates(ind, mk<BSGE>(mk<SELECT>(ov, a), zero), 14);
+            addToCandidates(ind,
+              mk<BULT>(mk<SELECT>(ov, a), mk<SELECT>(sv, al.first)), 15);
+            addToCandidates(ind,
+              mk<BULE>(mk<SELECT>(ov, a), mk<SELECT>(sv, al.first)), 16);
+          }
+        }
+      }
+    }
+
+    void processData(int chc)
+    {
+      auto & c = ruleManager.chcs[chc];
+      int indSrc = -1;
+      if (!c.isFact) indSrc = getVarIndex(c.srcRelation, decls);
+
+      Expr lems = indSrc >= 0 ?
+        conjoin(sfs[indSrc].back().learnedExprs, m_efac) : mk<TRUE>(m_efac);
+
+      getDataCandidates(chc, offsetsSizes, lems);
+    }
+
     tribool invSyn(int b = 0)
     {
       auto affected = simplifyCHCs();
       if (b > 0 && !affected) return indeterminate;
 
+      processBounds();
       for(int chc = 0; chc < ruleManager.chcs.size(); chc++)
       {
         auto & c = ruleManager.chcs[chc];
@@ -899,6 +949,7 @@ namespace ufo
         if (c.isQuery) processQuery(c);
         if (c.isInductive) processInd(c);
         if (!c.isQuery && !c.isFact && !c.isInductive) processProp(c);
+        if (!c.isInductive && !c.isQuery && dat) processData(chc);
       }
 
       if (multiHoudini(ruleManager.allCHCs))
@@ -912,6 +963,46 @@ namespace ufo
       }
 
       return invSyn(b + 1);
+    }
+
+    void mutate(ExprSet& tmp, ExprSet &extraVars)
+    {
+      ExprSet v;
+      for (auto cit = tmp.begin(); cit != tmp.end(); ++cit)
+      {
+        auto & c = *cit;
+        v.insert(repairBeq(c));
+        for (auto dit = std::next(cit); dit != tmp.end(); ++dit)
+        {
+          auto & d = *dit;
+          v.insert(repairBeq(mk<EQ>(mk<BSUB>(c->left(), d->left()),
+                                (mk<BSUB>(c->right(), d->right())))));
+          v.insert(repairBeq(mk<EQ>(mk<BSUB>(c->left(), d->right()),
+                                (mk<BSUB>(c->left(), d->right())))));
+          v.insert(repairBeq(mk<EQ>(mk<BADD>(c->left(), d->left()),
+                                (mk<BADD>(c->right(), d->right())))));
+          v.insert(repairBeq(mk<EQ>(mk<BADD>(c->left(), d->right()),
+                                (mk<BADD>(c->left(), d->right())))));
+        }
+      }
+      tmp.clear();
+      tmp.insert(v.begin(), v.end());
+    }
+
+    void getDataCandidates(int chc, ExprSet& extraVars, Expr invs, int mut = 1)
+    {
+      DataLearner dl(ruleManager, m_z3, to, printLog);
+      auto & r = ruleManager.chcs[chc].dstRelation;
+      auto ind = getVarIndex(r, decls);
+
+      for (bool b : {false, true})
+      {
+        dl.computeDataOne(chc, r, invs, b, extraVars);
+        ExprSet tmp;
+        dl.computePolynomials(r, tmp);
+        for (int i = 0; i < mut; i++) mutate(tmp, extraVars);
+        for (auto & t : tmp) addToCandidates(ind, t, 30);
+      }
     }
 
     void simplifyCHCstruct()
@@ -937,7 +1028,7 @@ namespace ufo
 
   inline void process(string smt,
                       map<int, string>& varIds,  // obsolete, to remove
-                      bool memsafety, bool serial, int debug,
+                      bool memsafety, bool dat, bool serial, int debug,
                       int mem, int to)
   {
     ExprFactory m_efac;
@@ -973,7 +1064,7 @@ namespace ufo
       return;
     }
 
-    MemProcessor ds(m_efac, z3, ruleManager, varIds, debug, to);
+    MemProcessor ds(m_efac, z3, ruleManager, dat, varIds, debug, to);
 
     for (auto dcl : ruleManager.decls)
       ds.initializeDecl(dcl->left());

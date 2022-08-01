@@ -217,84 +217,83 @@ namespace ufo
       // where a_1, a_2, etc are from basis columns values
       // and x_1, x_2 etc are monomials from corresponding basis' rows
       // to disallow unsound invariants like a_1 = 0 add only candidates with atleast two terms
-      Expr zero = mkTerm(mpz_class(0), m_efac);
       for (int col = 0; col < basis.n_cols; col++) {
         int numTerms = 0;
-        Expr poly = nullptr;
+        Expr poly = NULL;
         bool toCont = false;
         double coef = 1;
         double intpart;
+        Expr ty = NULL;
         for (int row = 0; row < basis.n_rows; row++) {
-//          //coeffcient is stored in a stream first to avoid incorrect type conversion error
-//          std::stringstream coeffStream;
-//          coeffStream << std::fixed << basis(row,col);
-          double cur = basis(row,col) * coef;
-//          cout <<std::fixed << cur << " * v_" << row << " + ";
-
-//          Expr abstractVar = nullptr;
-//          if (!allowedPolyCoefficient(basis(row,col), abstractVar)) {
+          double cur = basis(row, col) * coef;
 
           Expr mult;
           Expr monomialExpr = monomialToExpr[row];
+          if (!isOpX<MPZ>(monomialExpr)) ty = typeOf(monomialExpr);
 
           if (std::modf(cur, &intpart) != 0.0) {
             double c = (1/cur);
             if (std::modf(c, &intpart) == 0.0) {
               cur = 1;
               cpp_int c1 = lexical_cast<cpp_int>(c);
-              if (poly != nullptr) poly = mk<MULT>(mkMPZ(c1, m_efac), poly);
-              mult = mk<MULT>(mkMPZ(lexical_cast<cpp_int>(cur), m_efac), monomialToExpr[row]);
+              if (poly != NULL)
+              {
+                if (isOpX<MPZ>(poly))
+                  poly = mkMPZ(c1 * lexical_cast<cpp_int>(poly), m_efac);
+                else
+                  poly = mk<BMUL>(bvnum(mkMPZ(c1, m_efac), ty), poly);
+              }
+              if (isOpX<MPZ>(monomialExpr))
+                mult = mkMPZ(lexical_cast<cpp_int>(monomialExpr), m_efac);
+              else
+                mult = monomialExpr;
               coef *= c;
             } else {
               toCont = true;
-              poly = nullptr;
+              poly = NULL;
               break;
             }
           }
-          else
-/*        if (abstractVar != nullptr && (isNumericConst(monomialExpr) || curPolyDegree > 1)) {
-            if (!isNumericConst(monomialExpr)) {
-              mult = mk<MULT>(abstractVar, monomialExpr);
-            } else {
-              int monomialInt = lexical_cast<int>(monomialExpr);
-              //assumption is that abstractVar will be of the form intConst * var or var * intConst
-              bool success = true;
-              Expr var = nullptr;
-              cpp_int varCoeff = 1;
-              if (!isOpX<MULT>(abstractVar)) {
-                success = false;
-              } else {
-                for (auto it = abstractVar->args_begin(), end = abstractVar->args_end(); it != end; ++it) {
-                  if (isNumericConst(*it)) {
-                    varCoeff = lexical_cast<cpp_int>(*it);
-                  } else if (bind::isIntConst(*it)) {
-                    var = *it;
-                  } else {
-                    success = false;
-                  }
-                }
-              }
-              if (!success || var == nullptr) {
-                mult = mk<MULT>(abstractVar, monomialExpr);
-              } else {
-                mult = mk<MULT>(mkMPZ(varCoeff*monomialInt, m_efac), var);
-              }
-            }
-          } else */
+          else //if (lexical_cast<cpp_int>(cur) != 0)
           {
-            mult = mk<MULT>(mkMPZ(lexical_cast<cpp_int>(cur), m_efac), monomialToExpr[row]);
+            cpp_int tmp = (cpp_int)cur;
+            if (isOpX<MPZ>(monomialExpr))
+              mult = mkMPZ(lexical_cast<cpp_int>(tmp) * lexical_cast<cpp_int>(monomialExpr), m_efac);
+            else
+              mult = mk<BMUL>(bvnum(mkMPZ(lexical_cast<cpp_int>(tmp), m_efac), ty), monomialExpr);
           }
 
-          if (poly != nullptr) {
-            poly = mk<PLUS>(poly, mult);
+          if (poly != NULL) {
+            if (!isOpX<MPZ>(poly))
+              ty = typeOf(poly);
+            else if (!isOpX<MPZ>(mult))
+              ty = typeOf(mult);
+
+            if (isOpX<MPZ>(poly))
+              poly = bvnum(poly, ty);
+
+            if (typeOf(poly) != typeOf(mult))
+            {
+              Expr t1 = typeOf(poly);
+              Expr t2 = typeOf(mult);
+              int w1 = width(t1);
+              int w2 = width(t2);
+              if (w1 > w2) mult = bv::sext (mult, w1);
+              else mult = bv::extract(w1 - 1, 0, mult);
+            }
+            poly = mk<BADD>(poly, mult);
           } else {
+
+            if (!isOpX<MPZ>(mult))
+              ty = typeOf(mult);
+
             poly = mult;
           }
           numTerms++;
         }
         if (toCont) continue;
-        if (poly != nullptr && numTerms > 1) {
-          poly = mk<EQ>(poly, zero);
+        if (poly != NULL && numTerms > 1) {
+          poly = mk<EQ>(poly, bvnum(mkTerm(mpz_class(0), m_efac), ty));
           polynomials.push_back(poly);
         }
       }
@@ -510,6 +509,13 @@ namespace ufo
       exprToModels.clear();
       invVars.clear();
       bnd.unrollAndExecuteSplitter(srcRel, invVars[srcRel], exprToModels[srcRel], splitter, invs, fwd, constr);
+    }
+
+    void computeDataOne(int chc, Expr srcRel, Expr invs, bool useVars, ExprSet& addVars)
+    {
+      exprToModels.clear();
+      invVars.clear();
+      bnd.unrollAndExecuteOne(chc, srcRel, invVars[srcRel], exprToModels[srcRel], invs, useVars, addVars);
     }
 
     ExprSet& getConcrInvs(Expr rel) { return bnd.concrInvs[rel]; }
