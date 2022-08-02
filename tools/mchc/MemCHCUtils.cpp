@@ -55,6 +55,7 @@ int main (int argc, char ** argv)
   const char *OPT_DEBUG = "--debug";
   const char *OPT_HELP = "--help";
   const char *OPT_DAT = "--data";
+  const char *OPT_CNT = "--counters";
   const char *OPT_MEM = "--mem";
   const char *OPT_MSAF = "--memsafety";
   const char *OPT_TO = "--to";
@@ -78,6 +79,7 @@ int main (int argc, char ** argv)
   bool serial = getBoolValue(OPT_SER, false, argc, argv);
   bool memsaf = getBoolValue(OPT_MSAF, false, argc, argv);
   bool dat = getBoolValue(OPT_DAT, false, argc, argv);
+  bool cnt = getBoolValue(OPT_CNT, false, argc, argv);
   int to = getIntValue(OPT_TO, 1000, argc, argv);
 
   //get names
@@ -100,6 +102,6 @@ int main (int argc, char ** argv)
     }
   }
 
-  process(string(argv[argc-1]), var_ids, memsaf, dat, serial, debug, mem, to);
+  process(string(argv[argc-1]), var_ids, memsaf, dat, cnt, serial, debug, mem, to);
   return 0;
 }

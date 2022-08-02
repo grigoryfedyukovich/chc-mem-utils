@@ -12,11 +12,11 @@ namespace ufo
   {
     public:
 
-    MemProcessor (ExprFactory &m_efac, EZ3 &z3, CHCs& r, bool _dat,
+    MemProcessor (ExprFactory &m_efac, EZ3 &z3, CHCs& r, bool _dat, bool _cnt,
                                       map<int, string>& _v, int debug, int to) :
       RndLearnerV3 (m_efac, z3, r, to, false, false, 0, 1, false, 0, false,
                 false, true, false, 0, false, false, to, debug),
-                dat(_dat), varIds(_v) {}
+                dat(_dat), cnts(_cnt), varIds(_v) {}
 
     map<Expr, int> allocMap, offMap, sizMap, memMap;
     map<Expr, ExprSet> allocVals;
@@ -26,7 +26,9 @@ namespace ufo
     map<int, string>& varIds;
     Expr lastDecl = NULL;
     ExprSet offsetsSizes;
-    bool dat;
+    bool dat, cnts;
+    map<Expr, ExprSet> sizes, counters, negCounters;
+    ExprSet upbounds, lobounds; // to make rel-specific
 
     bool multiHoudini (vector<HornRuleExt*> worklist, bool recur = true,
       bool fastExit = false)
@@ -691,6 +693,67 @@ namespace ufo
                 << debugMarker << ": " << e << "\n";
     }
 
+    void countersAnalysis()
+    {
+      for(auto & c : ruleManager.chcs)
+      {
+        if (!c.isInductive) continue;
+
+        auto ind = getVarIndex(c.dstRelation, decls);
+        auto lems = sfs[ind].back().learnedExprs;
+        lems.insert(c.body);
+        auto strbody = conjoin(lems, m_efac);
+
+        // find counters
+        // consider only one-by-one counters
+        for (auto i = 0; i < c.srcVars.size(); i++)
+        {
+          if (is_bvconst(c.srcVars[i]))
+          {
+            auto ty = typeOf(c.srcVars[i]);
+            Expr one = bvnum(mkMPZ(1, m_efac), ty);   // one-by-one counters
+            if (u.implies(strbody, mk<EQ>(mk<BADD>(one, c.srcVars[i]),
+                                         c.dstVars[i])))
+            {
+              if (printLog)
+                outs () << "possibly counter: " << c.srcVars[i] << "\n";
+              counters[c.srcRelation].insert(c.srcVars[i]);
+              lobounds.insert(bvnum(mkMPZ(0, m_efac), ty));
+            }
+
+            if (u.implies(strbody, mk<EQ>(mk<BSUB>(c.srcVars[i], one),
+                                         c.dstVars[i])))
+            {
+              if (printLog)
+                outs () << "possibly NEG counter: " << c.srcVars[i] << "\n";
+              negCounters[c.srcRelation].insert(c.srcVars[i]);
+            }
+          }
+
+          if (i == offMap[c.srcRelation])
+          {
+            for (auto & al : aliases[c.srcRelation])
+            {
+              for (auto & a : al.second)
+              {
+                auto ty = typeOf(c.srcVars[i])->right();
+                Expr one = bvnum(mkMPZ(1, m_efac), ty); // one-by-one counters
+                if (u.implies(strbody,
+                         mk<EQ>(mk<BADD>(one, mk<SELECT>(c.srcVars[i], a)),
+                                  mk<SELECT>(c.dstVars[i], a))))
+                {
+                  if (printLog)
+                    outs () << "possibly counter: "
+                            << mk<SELECT>(c.srcVars[i], a)  << "\n";
+                  counters[c.srcRelation].insert(mk<SELECT>(c.srcVars[i], a));
+                  lobounds.insert(bvnum(mkMPZ(0, m_efac), ty));
+                }
+              }
+            }
+          }
+        }
+      }
+    }
 
     bool simplifyCHCs()
     {
@@ -816,6 +879,18 @@ namespace ufo
         {
           if (dst != dstpr) bb = replaceAll(bb, dstpr, dst);
           addToCandidates(indDst, bb, debugMarker);
+
+          if (isOpX<EQ>(bb) && isOpX<SELECT>(bb->left()) &&
+              contains(allArrVars, bb->left()->left()))
+          {
+            if (true == u.equalsTo(bb->right(), mkMPZ(0, m_efac)))
+            {
+              Expr up = bb->left()->right();
+              if (printLog)
+                outs () << "  storing zero at " << up << "\n";
+              upbounds.insert(up);
+            }
+          }
         }
       }
     }
@@ -885,6 +960,39 @@ namespace ufo
       }
     }
 
+    void processInitCounters(HornRuleExt& c)
+    {
+      ExprSet bodyCnjs;
+      getConj(c.body, bodyCnjs);
+      int indSrc = -1;
+      int indDst = -1;
+      if (!c.isFact) indSrc = getVarIndex(c.srcRelation, decls);
+      if (!c.isQuery) indDst = getVarIndex(c.dstRelation, decls);
+
+      // last vals of prev counters
+      for (auto & cnt : counters[c.srcRelation])
+      {
+        auto ty = typeOf(cnt);
+        for (auto u : upbounds)
+        {
+          if (typeOf(u) == typeOf(cnt))
+          {
+            addToCandidates(indDst, mk<EQ>(cnt, u), 21);
+            lobounds.insert(u);
+          }
+        }
+      }
+
+      for (auto & cnt : counters[c.srcRelation])
+      {
+        for (auto & al : aliases[c.srcRelation])
+          for (auto & a : al.second)
+            addToCandidates(indSrc, mk<EQ>(
+              mk<SELECT>(c.srcVars[offMap[c.srcRelation]], a),
+              cnt), 16);
+      }
+    }
+
     void processBounds()
     {
       for (auto & decl : ruleManager.decls)
@@ -899,6 +1007,7 @@ namespace ufo
         for (auto & al : aliases[d])
         {
           addToCandidates(ind, mk<BUGT>(mk<SELECT>(sv, al.first), zero), 12);
+          sizes[d].insert(mk<SELECT>(sv, al.first));
 
           for (auto & v : ruleManager.invVars[d])
             if (is_bvconst(v))
@@ -917,6 +1026,26 @@ namespace ufo
               mk<BULE>(mk<SELECT>(ov, a), mk<SELECT>(sv, al.first)), 16);
           }
         }
+
+        for (auto & cnt1 : counters[d])
+        {
+          for (auto & cnt2 : counters[d])
+          {
+            if (cnt1 == cnt2 || typeOf(cnt1) != typeOf(cnt2)) continue;
+            for (auto & l: lobounds)
+            {
+              if (typeOf(cnt1) != typeOf(l)) continue;
+              addToCandidates(ind, mk<BULE>(mk<BSUB>(cnt1, cnt2), l), 27);
+              addToCandidates(ind, mk<BUGE>(mk<BSUB>(cnt1, cnt2), l), 27);
+            }
+          }
+        }
+
+        for (auto & cnt : counters[d])
+          for (auto l : lobounds)
+            for (auto u : upbounds)
+              if (typeOf(u) == typeOf(cnt) && typeOf(l) == typeOf(cnt))
+                addToCandidates(ind, mk<BULE>(cnt, mk<BADD>(l, u)), 8);
       }
     }
 
@@ -929,14 +1058,35 @@ namespace ufo
       Expr lems = indSrc >= 0 ?
         conjoin(sfs[indSrc].back().learnedExprs, m_efac) : mk<TRUE>(m_efac);
 
-      getDataCandidates(chc, offsetsSizes, lems);
+      ExprSet extrVars;
+      if (cnts)
+      {
+        for (auto & d : decls)
+        {
+          extrVars.insert(counters[d].begin(), counters[d].end());
+          extrVars.insert(negCounters[d].begin(), negCounters[d].end());
+        }
+        if (!extrVars.empty())
+        {
+          for (auto & d : decls)
+            extrVars.insert(sizes[d].begin(), sizes[d].end());
+          extrVars.insert(upbounds.begin(), upbounds.end());
+        }
+      }
+
+      // first, see if we have any counters, then also add their sizes
+      // otherwise, proceed with all vars
+      if (extrVars.empty()) extrVars = offsetsSizes;
+      getDataCandidates(chc, extrVars, lems);
     }
 
     tribool invSyn(int b = 0)
     {
+      candidates.clear();
       auto affected = simplifyCHCs();
-      if (b > 0 && !affected) return indeterminate;
+      if (b > 0 && !affected || b > 3) return indeterminate;
 
+      if (cnts) countersAnalysis();
       processBounds();
       for(int chc = 0; chc < ruleManager.chcs.size(); chc++)
       {
@@ -948,6 +1098,7 @@ namespace ufo
         if (c.isFact) processFact(c);
         if (c.isQuery) processQuery(c);
         if (c.isInductive) processInd(c);
+        if (!c.isInductive && !c.isQuery) processInitCounters(c);
         if (!c.isQuery && !c.isFact && !c.isInductive) processProp(c);
         if (!c.isInductive && !c.isQuery && dat) processData(chc);
       }
@@ -995,7 +1146,10 @@ namespace ufo
       auto & r = ruleManager.chcs[chc].dstRelation;
       auto ind = getVarIndex(r, decls);
 
-      for (bool b : {false, true})
+      vector<bool> range = {false};
+      if (!cnts) range.push_back(true);
+
+      for (bool b : range)
       {
         dl.computeDataOne(chc, r, invs, b, extraVars);
         ExprSet tmp;
@@ -1028,7 +1182,7 @@ namespace ufo
 
   inline void process(string smt,
                       map<int, string>& varIds,  // obsolete, to remove
-                      bool memsafety, bool dat, bool serial, int debug,
+                      bool memsafety, bool dat, bool cnt, bool serial, int debug,
                       int mem, int to)
   {
     ExprFactory m_efac;
@@ -1064,7 +1218,7 @@ namespace ufo
       return;
     }
 
-    MemProcessor ds(m_efac, z3, ruleManager, dat, varIds, debug, to);
+    MemProcessor ds(m_efac, z3, ruleManager, dat, cnt, varIds, debug, to);
 
     for (auto dcl : ruleManager.decls)
       ds.initializeDecl(dcl->left());
