@@ -450,6 +450,14 @@ namespace ufo
       return mk<AND>(distribDisjoin(disjs, efac), b);
     }
 
+    // bv-specific
+    tribool equalsTo(Expr e, Expr v)
+    {
+      if (!isOp<BvOp>(e)) return indeterminate;
+      if (!isOpX<MPZ>(v)) return indeterminate;
+      return isTrue(mk<EQ>(e, bvnum(v, typeOf(e))));
+    }
+    
     /**
      * Model-based simplification of a formula with 1 (one only) variable
      */

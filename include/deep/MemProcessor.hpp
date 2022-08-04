@@ -27,8 +27,7 @@ namespace ufo
     Expr lastDecl = NULL;
     ExprSet offsetsSizes;
     bool dat, cnts;
-    map<Expr, ExprSet> sizes, counters, negCounters;
-    ExprSet upbounds, lobounds; // to make rel-specific
+    map<Expr, ExprSet> sizes, counters, negCounters, upbounds, lobounds;
 
     bool multiHoudini (vector<HornRuleExt*> worklist, bool recur = true,
       bool fastExit = false)
@@ -718,7 +717,7 @@ namespace ufo
               if (printLog)
                 outs () << "possibly counter: " << c.srcVars[i] << "\n";
               counters[c.srcRelation].insert(c.srcVars[i]);
-              lobounds.insert(bvnum(mkMPZ(0, m_efac), ty));
+              lobounds[c.srcRelation].insert(bvnum(mkMPZ(0, m_efac), ty));
             }
 
             if (u.implies(strbody, mk<EQ>(mk<BSUB>(c.srcVars[i], one),
@@ -746,7 +745,7 @@ namespace ufo
                     outs () << "possibly counter: "
                             << mk<SELECT>(c.srcVars[i], a)  << "\n";
                   counters[c.srcRelation].insert(mk<SELECT>(c.srcVars[i], a));
-                  lobounds.insert(bvnum(mkMPZ(0, m_efac), ty));
+                  lobounds[c.srcRelation].insert(bvnum(mkMPZ(0, m_efac), ty));
                 }
               }
             }
@@ -865,20 +864,23 @@ namespace ufo
       return changed;
     }
 
-    void preproAdder(Expr a, ExprVector& dst, ExprVector& dstpr,
-                     int indDst, int debugMarker)
+    void preproAdder(Expr a, ExprVector& vars, ExprVector& varsp,
+                     int ind, int debugMarker)
     {
       auto b = rewriteSelectStore(a);
       b = u.removeITE(b);
-      b = keepQuantifiersReplWeak(b, dstpr);
+      b = keepQuantifiersReplWeak(b, varsp);
       ExprSet cnjs;
       getConj(b, cnjs);
+
+      if (isOpX<EQ>(a)) cnjs.insert(a); // for arrays and further simplification
+
       for (auto bb : cnjs)
       {
-        if (hasOnlyVars(bb, dstpr))
+        if (hasOnlyVars(bb, varsp))
         {
-          if (dst != dstpr) bb = replaceAll(bb, dstpr, dst);
-          addToCandidates(indDst, bb, debugMarker);
+          if (vars != varsp) bb = replaceAll(bb, varsp, vars);
+          addToCandidates(ind, bb, debugMarker);
 
           if (isOpX<EQ>(bb) && isOpX<SELECT>(bb->left()) &&
               contains(allArrVars, bb->left()->left()))
@@ -888,7 +890,7 @@ namespace ufo
               Expr up = bb->left()->right();
               if (printLog)
                 outs () << "  storing zero at " << up << "\n";
-              upbounds.insert(up);
+              upbounds[decls[ind]].insert(up);
             }
           }
         }
@@ -973,12 +975,12 @@ namespace ufo
       for (auto & cnt : counters[c.srcRelation])
       {
         auto ty = typeOf(cnt);
-        for (auto u : upbounds)
+        for (auto u : upbounds[c.srcRelation])
         {
           if (typeOf(u) == typeOf(cnt))
           {
             addToCandidates(indDst, mk<EQ>(cnt, u), 21);
-            lobounds.insert(u);
+            lobounds[c.dstRelation].insert(u);
           }
         }
       }
@@ -1032,7 +1034,7 @@ namespace ufo
           for (auto & cnt2 : counters[d])
           {
             if (cnt1 == cnt2 || typeOf(cnt1) != typeOf(cnt2)) continue;
-            for (auto & l: lobounds)
+            for (auto & l: lobounds[d])
             {
               if (typeOf(cnt1) != typeOf(l)) continue;
               addToCandidates(ind, mk<BULE>(mk<BSUB>(cnt1, cnt2), l), 27);
@@ -1042,8 +1044,8 @@ namespace ufo
         }
 
         for (auto & cnt : counters[d])
-          for (auto l : lobounds)
-            for (auto u : upbounds)
+          for (auto l : lobounds[d])
+            for (auto u : upbounds[d])
               if (typeOf(u) == typeOf(cnt) && typeOf(l) == typeOf(cnt))
                 addToCandidates(ind, mk<BULE>(cnt, mk<BADD>(l, u)), 8);
       }
@@ -1069,8 +1071,10 @@ namespace ufo
         if (!extrVars.empty())
         {
           for (auto & d : decls)
+          {
             extrVars.insert(sizes[d].begin(), sizes[d].end());
-          extrVars.insert(upbounds.begin(), upbounds.end());
+            extrVars.insert(upbounds[d].begin(), upbounds[d].end());
+          }
         }
       }
 
@@ -1084,7 +1088,7 @@ namespace ufo
     {
       candidates.clear();
       auto affected = simplifyCHCs();
-      if (b > 0 && !affected || b > 3) return indeterminate;
+      if (b > 0 && !affected) return indeterminate;
 
       if (cnts) countersAnalysis();
       processBounds();

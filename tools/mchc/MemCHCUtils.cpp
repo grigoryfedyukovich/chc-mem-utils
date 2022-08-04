@@ -80,7 +80,7 @@ int main (int argc, char ** argv)
   bool memsaf = getBoolValue(OPT_MSAF, false, argc, argv);
   bool dat = getBoolValue(OPT_DAT, false, argc, argv);
   bool cnt = getBoolValue(OPT_CNT, false, argc, argv);
-  int to = getIntValue(OPT_TO, 1000, argc, argv);
+  int to = getIntValue(OPT_TO, 700, argc, argv);
 
   //get names
   const string pref("; var_id: ");
