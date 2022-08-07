@@ -939,26 +939,62 @@ namespace ufo
       }
     }
 
+    Expr unprime(Expr e, Expr rel)
+    {
+      return replaceAll(e,
+        ruleManager.invVarsPrime[rel], ruleManager.invVars[rel]);
+    }
+
     void processProp(HornRuleExt& c)
     {
+      ExprSet bodyCnjs;
+      getConj(c.body, bodyCnjs);
+      ExprMap bodyDEqs, bodySEqs;
+      for (auto a : bodyCnjs)
+        if (isOpX<EQ>(a) && contains(c.dstVars, a->left()))
+          bodyDEqs[a->left()] = a->right();
+        else if (isOpX<EQ>(a) && contains(c.dstVars, a->right()))
+          bodyDEqs[a->right()] = a->left();
+        else if (isOpX<EQ>(a) && contains(c.srcVars, a->left()))
+          bodySEqs[a->left()] = a->right();
+        else if (isOpX<EQ>(a) && contains(c.srcVars, a->right()))
+          bodySEqs[a->right()] = a->left();
+
+      ExprMap bodySEqsNew, bodyDEqsNew;
+      for (auto & a : bodySEqs)
+      {
+        Expr tmp = replaceAll(a.second, bodySEqs);
+        if (hasOnlyVars(tmp, ruleManager.invVarsPrime[c.dstRelation]))
+          bodySEqsNew[a.first] = unprime(tmp, c.dstRelation);
+      }
+      bodySEqs = bodySEqsNew;
+
+      for (auto & a : bodyDEqs)
+      {
+        Expr tmp = replaceAll(a.second, bodyDEqs);
+        if (hasOnlyVars(tmp, ruleManager.invVars[c.srcRelation]))
+          bodyDEqsNew[unprime(a.first, c.srcRelation)] = tmp;
+      }
+      bodyDEqs = bodyDEqsNew;
+
       int indSrc = getVarIndex(c.srcRelation, decls);
       int indDst = getVarIndex(c.dstRelation, decls);
 
       for (auto a : sfs[indSrc].back().learnedExprs)
       {
-        addToCandidates(indDst, a, 3);
+        addToCandidates(indDst, replaceAll(a, bodySEqs, 1), 3);
       }
       for (auto a : sfs[indDst].back().learnedExprs)
       {
-        addToCandidates(indSrc, a, 4);
+        addToCandidates(indSrc, replaceAll(a, bodyDEqs, 1), 4);
       }
       for (auto a : candidates[indSrc])
       {
-        addToCandidates(indDst, a, 5);
+        addToCandidates(indDst, replaceAll(a, bodySEqs, 1), 5);
       }
       for (auto a : candidates[indDst])
       {
-        addToCandidates(indSrc, a, 6);
+        addToCandidates(indSrc, replaceAll(a, bodyDEqs, 1), 6);
       }
     }
 
@@ -1021,7 +1057,6 @@ namespace ufo
             offsetsSizes.insert(mk<SELECT>(ov, a));
             offsetsSizes.insert(mk<SELECT>(sv, al.first));
 
-            addToCandidates(ind, mk<BSGE>(mk<SELECT>(ov, a), zero), 14);
             addToCandidates(ind,
               mk<BULT>(mk<SELECT>(ov, a), mk<SELECT>(sv, al.first)), 15);
             addToCandidates(ind,
@@ -1103,8 +1138,15 @@ namespace ufo
         if (c.isQuery) processQuery(c);
         if (c.isInductive) processInd(c);
         if (!c.isInductive && !c.isQuery) processInitCounters(c);
-        if (!c.isQuery && !c.isFact && !c.isInductive) processProp(c);
+        if (!c.isQuery && !c.isFact && !c.isInductive) processSimp(c);
         if (!c.isInductive && !c.isQuery && dat) processData(chc);
+      }
+
+      for (int i = 0; i < ruleManager.decls.size() - 1; i++)
+      {
+        for (auto & c : ruleManager.chcs)
+          if (!c.isQuery && !c.isFact && !c.isInductive)
+            processProp(c);
       }
 
       if (multiHoudini(ruleManager.allCHCs))
