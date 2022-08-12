@@ -982,6 +982,20 @@ namespace ufo
       int indSrc = getVarIndex(c.srcRelation, decls);
       int indDst = getVarIndex(c.dstRelation, decls);
 
+      for (auto & a : bodySEqs)
+      {
+        preproAdder(mk<EQ>(unprime(a.first, c.dstRelation), a.second),
+                       ruleManager.invVars[c.dstRelation],
+                       ruleManager.invVars[c.dstRelation], indDst, 23);
+      }
+
+      for (auto & a : bodyDEqs)
+      {
+        preproAdder(mk<EQ>(unprime(a.first, c.dstRelation), a.second),
+                       ruleManager.invVars[c.dstRelation],
+                       ruleManager.invVars[c.dstRelation], indDst, 24);
+      }
+
       for (auto a : sfs[indSrc].back().learnedExprs)
       {
         addToCandidates(indDst, replaceAll(a, bodySEqs, 1), 3);
