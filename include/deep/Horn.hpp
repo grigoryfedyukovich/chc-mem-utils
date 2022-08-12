@@ -959,7 +959,8 @@ namespace ufo
       mergedBody = mk<AND>(replaceAll(d->body, n->dstVars, newVars), mergedBody);
       n->locVars = newVars;
       n->locVars.insert(n->locVars.end(), s->locVars.begin(), s->locVars.end());
-      n->body = simpleQE(mergedBody, n->locVars);
+      auto tmp = simpleQE(mergedBody, n->locVars);
+      n->body = simplifyArr(tmp);
       n->shrinkLocVars();
       n->dstVars = s->dstVars;
       n->isInductive = n->srcRelation == n->dstRelation;

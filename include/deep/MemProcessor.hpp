@@ -915,13 +915,15 @@ namespace ufo
     {
       int indSrc = getVarIndex(c.srcRelation, decls);
 
-      ExprSet bodyCnjs;
-      getConj(c.body, bodyCnjs);
+      ExprSet bodyCnjs, bodyCnjsTmp;
+      getConj(mkNeg(c.body), bodyCnjs);
+      getConj(c.body, bodyCnjsTmp);
+      for (auto a : bodyCnjsTmp) bodyCnjs.insert(mkNeg(a));
 
       for (auto a : bodyCnjs)
       {
-        preproAdder(mkNeg(a), ruleManager.invVars[c.srcRelation],
-                              ruleManager.invVars[c.srcRelation], indSrc, 1);
+        preproAdder(a, ruleManager.invVars[c.srcRelation],
+                       ruleManager.invVars[c.srcRelation], indSrc, 1);
       }
     }
 
@@ -1000,8 +1002,6 @@ namespace ufo
 
     void processInitCounters(HornRuleExt& c)
     {
-      ExprSet bodyCnjs;
-      getConj(c.body, bodyCnjs);
       int indSrc = -1;
       int indDst = -1;
       if (!c.isFact) indSrc = getVarIndex(c.srcRelation, decls);
@@ -1013,7 +1013,7 @@ namespace ufo
         auto ty = typeOf(cnt);
         for (auto u : upbounds[c.srcRelation])
         {
-          if (typeOf(u) == typeOf(cnt))
+          if (typeOf(u) == ty)
           {
             addToCandidates(indDst, mk<EQ>(cnt, u), 21);
             lobounds[c.dstRelation].insert(u);
@@ -1021,13 +1021,16 @@ namespace ufo
         }
       }
 
+      if (indSrc < 0) return;
+
+      auto ty = typeOf(c.srcVars[offMap[c.srcRelation]])->right();
       for (auto & cnt : counters[c.srcRelation])
       {
         for (auto & al : aliases[c.srcRelation])
           for (auto & a : al.second)
-            addToCandidates(indSrc, mk<EQ>(
-              mk<SELECT>(c.srcVars[offMap[c.srcRelation]], a),
-              cnt), 16);
+            if (typeOf(cnt) == ty)
+              addToCandidates(indSrc, mk<EQ>(cnt,
+                mk<SELECT>(c.srcVars[offMap[c.srcRelation]], a)), 17);
       }
     }
 
@@ -1122,24 +1125,39 @@ namespace ufo
     tribool invSyn(int b = 0)
     {
       candidates.clear();
-      auto affected = simplifyCHCs();
-      if (b > 0 && !affected) return indeterminate;
-
-      if (cnts) countersAnalysis();
-      processBounds();
-      for(int chc = 0; chc < ruleManager.chcs.size(); chc++)
+      if (b == 0)
       {
-        auto & c = ruleManager.chcs[chc];
-        if (printLog)
-          outs () << "  Synthesize [" << b << "] for CHC "
-                  << c.srcRelation << " -> " << c.dstRelation << "\n";
+        for(auto & c : ruleManager.chcs)
+        {
+          if (c.isFact) continue;
+          if (isOpX<IMPL>(c.body))
+          {
+            preproAdder(c.body->left(), ruleManager.invVars[c.srcRelation],
+                         ruleManager.invVars[c.srcRelation],
+                            getVarIndex(c.srcRelation, decls), 100);
+          }
+        }
+      }
+      else
+      {
+        auto affected = simplifyCHCs();
+        if (!affected) return indeterminate;
 
-        if (c.isFact) processFact(c);
-        if (c.isQuery) processQuery(c);
-        if (c.isInductive) processInd(c);
-        if (!c.isInductive && !c.isQuery) processInitCounters(c);
-        if (!c.isQuery && !c.isFact && !c.isInductive) processSimp(c);
-        if (!c.isInductive && !c.isQuery && dat) processData(chc);
+        if (cnts) countersAnalysis();
+        processBounds();
+        for(int chc = 0; chc < ruleManager.chcs.size(); chc++)
+        {
+          auto & c = ruleManager.chcs[chc];
+          if (printLog)
+            outs () << "  Synthesize [" << b << "] for CHC "
+                    << c.srcRelation << " -> " << c.dstRelation << "\n";
+
+          if (c.isFact) processFact(c);
+          if (c.isQuery) processQuery(c);
+          if (c.isInductive) processInd(c);
+          if (!c.isInductive && !c.isQuery) processInitCounters(c);
+          if (!c.isInductive && !c.isQuery && dat) processData(chc);
+        }
       }
 
       for (int i = 0; i < ruleManager.decls.size() - 1; i++)
