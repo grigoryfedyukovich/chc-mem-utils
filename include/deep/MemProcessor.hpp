@@ -1096,10 +1096,16 @@ namespace ufo
         }
 
         for (auto & cnt : counters[d])
+        {
           for (auto l : lobounds[d])
+          {
+            addToCandidates(ind, typeRepair(mk<BSGE>(cnt, l)), 28);
+
             for (auto u : upbounds[d])
               if (typeOf(u) == typeOf(cnt) && typeOf(l) == typeOf(cnt))
                 addToCandidates(ind, mk<BULE>(cnt, mk<BADD>(l, u)), 8);
+          }
+        }
       }
     }
 
