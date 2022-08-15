@@ -6,6 +6,7 @@
 
 using namespace std;
 using namespace expr::op::bind;
+using namespace expr::op::bv;
 using namespace boost;
 using namespace boost::multiprecision;
 
@@ -59,9 +60,27 @@ namespace ufo
     return false;
   }
 
+  inline static Expr ssext (Expr v, Expr bvs)
+  {
+    if (isOpX<BSEXT>(v))
+    {
+      assert(width(v->last()) <= width(bvs));
+      return ssext(v->left(), bvs);
+    }
+    return mk<BSEXT> (v, bvs);
+  }
+
   inline static void getBaddTerm (Expr a, ExprVector &ptrms, ExprVector &ntrms)
   {
-    if (isOpX<BADD>(a))
+    if (isOpX<BSEXT>(a))
+    {
+      Expr bvs = a->last();
+      ExprVector p, n;
+      getBaddTerm(a->left(), p, n);
+      for (auto & t : p) ptrms.push_back(ssext(t, bvs));
+      for (auto & t : n) ntrms.push_back(ssext(t, bvs));
+    }
+    else if (isOpX<BADD>(a))
     {
       for (auto it = a->args_begin (); it != a->args_end (); ++it)
       {
@@ -124,9 +143,8 @@ namespace ufo
     comm -= filterVec(ntrms);
   }
 
-  inline static Expr repairBeq (Expr a)
+  inline static Expr repairBComp (Expr a)
   {
-    assert (isOpX<EQ>(a));
     auto & efac = a->getFactory();
     ExprVector ptrms, ntrms;
     cpp_int comm = 0;
@@ -158,12 +176,23 @@ namespace ufo
     Expr ty = NULL;
     if (!ptrms.empty()) ty = typeOf(*ptrms.begin());
     else if (!ntrms.empty()) ty = typeOf(*ntrms.begin());
-    else if (comm == 0) return mk<TRUE>(efac);
-    else return mk<FALSE>(efac);
+    else if (comm == 0)
+    {
+      if (isOpX<EQ>(a) || isOpX<BULE>(a) || isOpX<BUGE>(a) ||
+                          isOpX<BSLE>(a) || isOpX<BSGE>(a))
+        return mk<TRUE>(efac);
+      else mk<FALSE>(efac);
+    }
+    else
+    {
+      if (isOpX<EQ>(a)) return mk<FALSE>(efac);
+    }
 
     if (comm > 0) ptrms.push_back(bvnum(mkMPZ(comm, efac), ty));
     if (comm < 0) ntrms.push_back(bvnum(mkMPZ(-comm, efac), ty));
-    return mk<EQ>(mkbadd(ptrms, ty, efac), mkbadd(ntrms, ty, efac));
+    return
+      replaceAll(replaceAll(a, a->left(), mkbadd(ptrms, ty, efac)),
+                               a->right(), mkbadd(ntrms, ty, efac));
   }
 
   struct SimplifyBVExpr

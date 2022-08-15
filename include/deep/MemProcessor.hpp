@@ -12,7 +12,7 @@ namespace ufo
   {
     public:
 
-    MemProcessor (ExprFactory &m_efac, EZ3 &z3, CHCs& r, bool _dat, bool _cnt,
+    MemProcessor (ExprFactory &m_efac, EZ3 &z3, CHCs& r, bool _dat, int _cnt,
                                       map<int, string>& _v, int debug, int to) :
       RndLearnerV3 (m_efac, z3, r, to, false, false, 0, 1, false, 0, false,
                 false, true, false, 0, false, false, to, debug),
@@ -26,7 +26,8 @@ namespace ufo
     map<int, string>& varIds;
     Expr lastDecl = NULL;
     ExprSet offsetsSizes;
-    bool dat, cnts;
+    bool dat;
+    int cnts;
     map<Expr, ExprSet> sizes, counters, negCounters, upbounds, lobounds;
 
     bool multiHoudini (vector<HornRuleExt*> worklist, bool recur = true,
@@ -677,6 +678,7 @@ namespace ufo
       }
     }
 
+    map<int, map<int, ExprSet>> origs;
     void addToCandidates(int ind, Expr e, int debugMarker)
     {
       if (find(candidates[ind].begin(), candidates[ind].end(), e) !=
@@ -687,6 +689,8 @@ namespace ufo
 
       assert(hasOnlyVars(e, ruleManager.invVars[rel]));
       candidates[ind].push_back(e);
+      origs[ind][debugMarker].insert(e);
+
       if (printLog >= 2)
         outs () << "adding to candidates: " << rel << " / "
                 << debugMarker << ": " << e << "\n";
@@ -715,7 +719,8 @@ namespace ufo
                                          c.dstVars[i])))
             {
               if (printLog)
-                outs () << "possibly counter: " << c.srcVars[i] << "\n";
+                outs () << "possibly counter for " << c.srcRelation << ": "
+                        << c.srcVars[i] << "\n";
               counters[c.srcRelation].insert(c.srcVars[i]);
               lobounds[c.srcRelation].insert(bvnum(mkMPZ(0, m_efac), ty));
             }
@@ -724,7 +729,8 @@ namespace ufo
                                          c.dstVars[i])))
             {
               if (printLog)
-                outs () << "possibly NEG counter: " << c.srcVars[i] << "\n";
+                outs () << "possibly NEG counter for " << c.srcRelation << ": "
+                        << c.srcVars[i] << "\n";
               negCounters[c.srcRelation].insert(c.srcVars[i]);
             }
           }
@@ -742,7 +748,7 @@ namespace ufo
                                   mk<SELECT>(c.dstVars[i], a))))
                 {
                   if (printLog)
-                    outs () << "possibly counter: "
+                    outs () << "possibly counter for " << c.srcRelation << ": "
                             << mk<SELECT>(c.srcVars[i], a)  << "\n";
                   counters[c.srcRelation].insert(mk<SELECT>(c.srcVars[i], a));
                   lobounds[c.srcRelation].insert(bvnum(mkMPZ(0, m_efac), ty));
@@ -951,7 +957,7 @@ namespace ufo
     {
       ExprSet bodyCnjs;
       getConj(c.body, bodyCnjs);
-      ExprMap bodyDEqs, bodySEqs;
+      ExprMap bodySEqs, bodyDEqs; // for forward and backward prop, resp.
       for (auto a : bodyCnjs)
         if (isOpX<EQ>(a) && contains(c.dstVars, a->left()))
           bodyDEqs[a->left()] = a->right();
@@ -984,16 +990,18 @@ namespace ufo
 
       for (auto & a : bodySEqs)
       {
-        preproAdder(mk<EQ>(unprime(a.first, c.dstRelation), a.second),
+        if (true == u.isSat(mk<EQ>(a.first, a.second)))
+          preproAdder(mk<EQ>(a.first, a.second),
                        ruleManager.invVars[c.dstRelation],
-                       ruleManager.invVars[c.dstRelation], indDst, 23);
+                       ruleManager.invVars[c.dstRelation], indDst, 28);
       }
 
       for (auto & a : bodyDEqs)
       {
-        preproAdder(mk<EQ>(unprime(a.first, c.dstRelation), a.second),
+        if (true == u.isSat(mk<EQ>(a.first, a.second)))
+          preproAdder(mk<EQ>(a.first, a.second),
                        ruleManager.invVars[c.dstRelation],
-                       ruleManager.invVars[c.dstRelation], indDst, 24);
+                       ruleManager.invVars[c.dstRelation], indDst, 28);
       }
 
       for (auto a : sfs[indSrc].back().learnedExprs)
@@ -1012,6 +1020,49 @@ namespace ufo
       {
         addToCandidates(indSrc, replaceAll(a, bodyDEqs, 1), 6);
       }
+
+      if (cnts)
+      {
+        for (auto & l : sfs[indSrc].back().learnedExprs)
+        {
+          if (!isOpX<EQ>(l)) continue;
+
+          for (auto & cnt : counters[c.dstRelation])
+          {
+            if (cnt == l->left())
+            {
+              lobounds[c.dstRelation].insert(l->right());
+              if (printLog)
+                outs () << "  lower bound obtained from lemma: "
+                        << replaceAll(l->right(), bodySEqs, 1) << "\n";
+            }
+            else if (cnt == l->right())
+            {
+              lobounds[c.dstRelation].insert(l->left());
+              if (printLog)
+                outs () << "  lower bound obtained from lemma: "
+                        << replaceAll(l->left(), bodySEqs, 1) << "\n";
+            }
+          }
+          for (auto & cnt : negCounters[c.dstRelation])
+          {
+            if (cnt == l->left())
+            {
+              upbounds[c.dstRelation].insert(l->right());
+              if (printLog)
+                outs () << "  upper bound obtained from lemma: "
+                        << replaceAll(l->right(), bodySEqs, 1) << "\n";
+            }
+            else if (cnt == l->right())
+            {
+              upbounds[c.dstRelation].insert(l->left());
+              if (printLog)
+                outs () << "  upper bound obtained from lemma: "
+                        << replaceAll(l->left(), bodySEqs, 1) << "\n";
+            }
+          }
+        }
+      }
     }
 
     void processInitCounters(HornRuleExt& c)
@@ -1021,30 +1072,56 @@ namespace ufo
       if (!c.isFact) indSrc = getVarIndex(c.srcRelation, decls);
       if (!c.isQuery) indDst = getVarIndex(c.dstRelation, decls);
 
-      // last vals of prev counters
-      for (auto & cnt : counters[c.srcRelation])
+      for (auto u : upbounds[c.srcRelation])
       {
-        auto ty = typeOf(cnt);
-        for (auto u : upbounds[c.srcRelation])
-        {
-          if (typeOf(u) == ty)
-          {
-            addToCandidates(indDst, mk<EQ>(cnt, u), 21);
-            lobounds[c.dstRelation].insert(u);
-          }
-        }
+        // last vals of prev counters
+        for (auto & cnt : counters[c.srcRelation])
+          addToCandidates(indDst, typeRepair(mk<EQ>(cnt, u)), 24);
+        if (printLog)
+          outs () << "  copying upper bound " << u << " from " << c.srcRelation
+                  << " to " << c.dstRelation << "\n";
+        lobounds[c.dstRelation].insert(u);
+        upbounds[c.dstRelation].insert(u);
+      }
+
+      for (auto l : lobounds[c.srcRelation])
+      {
+        // last vals of prev negcounters
+        if (printLog)
+          outs () << "  copying lower bound " << l << " from " << c.srcRelation
+                  << " to " << c.dstRelation << "\n";
+        for (auto & cnt : negCounters[c.srcRelation])
+          addToCandidates(indDst, typeRepair(mk<EQ>(cnt, l)), 25);
+        lobounds[c.dstRelation].insert(l);
+        upbounds[c.dstRelation].insert(l);
       }
 
       if (indSrc < 0) return;
 
-      auto ty = typeOf(c.srcVars[offMap[c.srcRelation]])->right();
-      for (auto & cnt : counters[c.srcRelation])
-      {
+      if (cnts > 1)
         for (auto & al : aliases[c.srcRelation])
           for (auto & a : al.second)
-            if (typeOf(cnt) == ty)
-              addToCandidates(indSrc, mk<EQ>(cnt,
-                mk<SELECT>(c.srcVars[offMap[c.srcRelation]], a)), 17);
+          {
+            for (auto & cnt : counters[c.srcRelation])
+              addToCandidates(indSrc, typeRepair(mk<EQ>(cnt,
+                mk<SELECT>(c.srcVars[offMap[c.srcRelation]], a))), 26);
+            for (auto & cnt : negCounters[c.srcRelation])
+              addToCandidates(indSrc, typeRepair(mk<EQ>(cnt,
+                mk<SELECT>(c.srcVars[offMap[c.srcRelation]], a))), 27);
+          }
+    }
+
+    void addRelCntsCands(int ind, Expr d, Expr cnt1, Expr cnt2, int debugMarker)
+    {
+      for (auto & l: lobounds[d])
+      {
+        for (auto & u: upbounds[d])
+        {
+          Expr t1 = typeRepair(mk<BSUB>(cnt1, cnt2));
+          Expr t2 = typeRepair(mk<BADD>(l, u));
+          addToCandidates(ind, typeRepair(repairBComp(mk<BSLE>(t1, t2))), debugMarker);
+          addToCandidates(ind, typeRepair(repairBComp(mk<BSGE>(t1, t2))), debugMarker);
+        }
       }
     }
 
@@ -1054,6 +1131,13 @@ namespace ufo
       {
         auto d = decl->left();
         int ind = getVarIndex(d, decls);
+        if (printLog > 1)
+        {
+          outs () << "    lobounds[" << d << "] (" << lobounds[d].size() << "):\n";
+          pprint(lobounds[d], 6);
+          outs () << "    upbounds[" << d << "] (" << upbounds[d].size() << "):\n";
+          pprint(upbounds[d], 6);
+        }
         auto sv = ruleManager.invVars[d][sizMap[d]];
         auto ov = ruleManager.invVars[d][offMap[d]];
         auto ty = typeOf(sv)->right();
@@ -1061,49 +1145,65 @@ namespace ufo
 
         for (auto & al : aliases[d])
         {
-          addToCandidates(ind, mk<BUGT>(mk<SELECT>(sv, al.first), zero), 12);
+          addToCandidates(ind, mk<BSGT>(mk<SELECT>(sv, al.first), zero), 12);
           sizes[d].insert(mk<SELECT>(sv, al.first));
 
-          for (auto & v : ruleManager.invVars[d])
-            if (is_bvconst(v))
-              addToCandidates(ind,
-                mk<EQ>(bv::sext(v, width(ty)), mk<SELECT>(sv, al.first)), 13);
-
-          for (auto & a : al.second)
+          if (cnts > 1)
           {
-            offsetsSizes.insert(mk<SELECT>(ov, a));
-            offsetsSizes.insert(mk<SELECT>(sv, al.first));
+            for (auto & v : ruleManager.invVars[d])
+              if (is_bvconst(v))
+                addToCandidates(ind,
+                  typeRepair(mk<EQ>(v, mk<SELECT>(sv, al.first))), 13);
 
-            addToCandidates(ind,
-              mk<BULT>(mk<SELECT>(ov, a), mk<SELECT>(sv, al.first)), 15);
-            addToCandidates(ind,
-              mk<BULE>(mk<SELECT>(ov, a), mk<SELECT>(sv, al.first)), 16);
+            for (auto & a : al.second)
+            {
+              offsetsSizes.insert(mk<SELECT>(ov, a));
+              offsetsSizes.insert(mk<SELECT>(sv, al.first));
+
+              addToCandidates(ind,
+                mk<BSLT>(mk<SELECT>(ov, a), mk<SELECT>(sv, al.first)), 15);
+              addToCandidates(ind,
+                mk<BSLE>(mk<SELECT>(ov, a), mk<SELECT>(sv, al.first)), 16);
+            }
           }
         }
 
-        for (auto & cnt1 : counters[d])
+        if (cnts > 1)
         {
-          for (auto & cnt2 : counters[d])
-          {
-            if (cnt1 == cnt2 || typeOf(cnt1) != typeOf(cnt2)) continue;
-            for (auto & l: lobounds[d])
-            {
-              if (typeOf(cnt1) != typeOf(l)) continue;
-              addToCandidates(ind, mk<BULE>(mk<BSUB>(cnt1, cnt2), l), 27);
-              addToCandidates(ind, mk<BUGE>(mk<BSUB>(cnt1, cnt2), l), 27);
-            }
-          }
+          for (auto & cnt1 : counters[d])
+            for (auto & cnt2 : counters[d])
+              if (cnt1 != cnt2)
+                addRelCntsCands(ind, d, cnt1, cnt2, 17);
+
+          for (auto & cnt1 : counters[d])
+            for (auto cnt2 : negCounters[d])
+              addRelCntsCands(ind, d, cnt1, cnt2, 18);
+
+          for (auto cnt1 : negCounters[d])
+            for (auto cnt2 : negCounters[d])
+              if (cnt1 != cnt2)
+                addRelCntsCands(ind, d, cnt1, cnt2, 19);
         }
 
         for (auto & cnt : counters[d])
         {
           for (auto l : lobounds[d])
           {
-            addToCandidates(ind, typeRepair(mk<BSGE>(cnt, l)), 28);
+            addToCandidates(ind, typeRepair(mk<BSGE>(cnt, l)), 20);
+            if (cnts > 1)
+              for (auto u : upbounds[d])
+                addToCandidates(ind, typeRepair(mk<BSLE>(cnt, typeRepair(mk<BADD>(l, u)))), 21);
+          }
+        }
 
-            for (auto u : upbounds[d])
-              if (typeOf(u) == typeOf(cnt) && typeOf(l) == typeOf(cnt))
-                addToCandidates(ind, mk<BULE>(cnt, mk<BADD>(l, u)), 8);
+        for (auto & cnt : negCounters[d])
+        {
+          for (auto u : upbounds[d])
+          {
+            addToCandidates(ind, typeRepair(mk<BSLE>(cnt, u)), 22);
+            if (cnts > 1)
+              for (auto l : lobounds[d])
+                addToCandidates(ind, typeRepair(mk<BSLE>(cnt, typeRepair(mk<BADD>(l, u)))), 23);
           }
         }
       }
@@ -1190,6 +1290,7 @@ namespace ufo
       if (multiHoudini(ruleManager.allCHCs))
       {
         assignPrioritiesForLearned();
+        if (printLog) printStats();
         if(checkAllLemmas())
         {
           printSolution();
@@ -1200,24 +1301,53 @@ namespace ufo
       return invSyn(b + 1);
     }
 
+    void printStats()
+    {
+      set<int> all, used;
+      for (auto & decl : ruleManager.decls)
+      {
+        auto d = decl->left();
+        int ind = getVarIndex(d, decls);
+          for (auto & b : origs[ind])
+          {
+            all.insert(b.first);
+            for (auto & l : sfs[ind].back().learnedExprs)
+            {
+              if (find(b.second.begin(), b.second.end(), l) != b.second.end())
+                used.insert(b.first);
+          }
+        }
+      }
+
+      for (auto it = all.begin(); it != all.end();)
+      {
+        if (find(used.begin(), used.end(), *it) == used.end()) it++;
+        else it = all.erase(it);
+      }
+
+      outs () << "UNUSED cands: ";
+      for (auto & a : all) outs () << a << ", ";
+      outs () << "\n";
+    }
+
     void mutate(ExprSet& tmp, ExprSet &extraVars)
     {
       ExprSet v;
       for (auto cit = tmp.begin(); cit != tmp.end(); ++cit)
       {
         auto & c = *cit;
-        v.insert(repairBeq(c));
+        v.insert(repairBComp(c));
         for (auto dit = std::next(cit); dit != tmp.end(); ++dit)
         {
           auto & d = *dit;
-          v.insert(repairBeq(mk<EQ>(mk<BSUB>(c->left(), d->left()),
-                                (mk<BSUB>(c->right(), d->right())))));
-          v.insert(repairBeq(mk<EQ>(mk<BSUB>(c->left(), d->right()),
-                                (mk<BSUB>(c->left(), d->right())))));
-          v.insert(repairBeq(mk<EQ>(mk<BADD>(c->left(), d->left()),
-                                (mk<BADD>(c->right(), d->right())))));
-          v.insert(repairBeq(mk<EQ>(mk<BADD>(c->left(), d->right()),
-                                (mk<BADD>(c->left(), d->right())))));
+          v.insert(repairBComp(mk<EQ>(mk<BSUB>(c->left(), d->left()),
+                                     (mk<BSUB>(c->right(), d->right())))));
+          v.insert(repairBComp(mk<EQ>(mk<BSUB>(c->left(), d->right()),
+                                     (mk<BSUB>(c->left(), d->right())))));
+          v.insert(repairBComp(mk<EQ>(mk<BADD>(c->left(), d->left()),
+                                     (mk<BADD>(c->right(), d->right())))));
+          v.insert(repairBComp(mk<EQ>(mk<BADD>(c->left(), d->right()),
+                                     (mk<BADD>(c->left(), d->right())))));
         }
       }
       tmp.clear();
@@ -1266,7 +1396,7 @@ namespace ufo
 
   inline void process(string smt,
                       map<int, string>& varIds,  // obsolete, to remove
-                      bool memsafety, bool dat, bool cnt, bool serial, int debug,
+                      bool memsafety, bool dat, int cnt, bool serial, int debug,
                       int mem, int to)
   {
     ExprFactory m_efac;

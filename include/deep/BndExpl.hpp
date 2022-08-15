@@ -706,7 +706,12 @@ namespace ufo
             }
           }
         }
-        vars.insert(vars.end(), addVars.begin(), addVars.end());
+        for (auto & v : addVars)
+        {
+          if (is_bvnum(v) || isOpX<MPZ>(v)) continue;
+          vars.push_back(v);
+        }
+
         if (debug)
         {
           outs () << "adding these vars/terms for " << srcRel << "\n";

@@ -79,8 +79,8 @@ int main (int argc, char ** argv)
   bool serial = getBoolValue(OPT_SER, false, argc, argv);
   bool memsaf = getBoolValue(OPT_MSAF, false, argc, argv);
   bool dat = getBoolValue(OPT_DAT, false, argc, argv);
-  bool cnt = getBoolValue(OPT_CNT, false, argc, argv);
-  int to = getIntValue(OPT_TO, 700, argc, argv);
+  int cnt = getIntValue(OPT_CNT, 0, argc, argv);
+  int to = getIntValue(OPT_TO, (cnt >= 2) ? 20000 : 700, argc, argv);
 
   //get names
   const string pref("; var_id: ");
