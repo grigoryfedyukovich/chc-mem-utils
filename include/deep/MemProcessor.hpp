@@ -12,11 +12,11 @@ namespace ufo
   {
     public:
 
-    MemProcessor (ExprFactory &m_efac, EZ3 &z3, CHCs& r, bool _dat, int _cnt,
-                                      map<int, string>& _v, int debug, int to) :
+    MemProcessor (ExprFactory &m_efac, EZ3 &z3, CHCs& r, int _norm, bool _dat,
+        int _cnt, int _mut, int _prj, map<int, string>& _v, int debug, int to) :
       RndLearnerV3 (m_efac, z3, r, to, false, false, 0, 1, false, 0, false,
-                false, true, false, 0, false, false, to, debug),
-                dat(_dat), cnts(_cnt), varIds(_v) {}
+        false, true, false, 0, false, false, to, debug),
+        norm(_norm), dat(_dat), cnts(_cnt), mutNum(_mut), prj(_prj), varIds(_v) {}
 
     map<Expr, int> allocMap, offMap, sizMap, memMap;
     map<Expr, ExprSet> allocVals;
@@ -27,8 +27,9 @@ namespace ufo
     Expr lastDecl = NULL;
     ExprSet offsetsSizes;
     bool dat;
-    int cnts;
+    int norm, cnts, mutNum, prj;
     map<Expr, ExprSet> sizes, counters, negCounters, upbounds, lobounds;
+    map<int, ExprVector> candidatesNext;
 
     bool multiHoudini (vector<HornRuleExt*> worklist, bool recur = true,
       bool fastExit = false)
@@ -106,7 +107,7 @@ namespace ufo
         allocMap[d->left()] = -1;
         offMap[d->left()] = -1;
         sizMap[d->left()] = -1;
-        if (printLog >= 2)
+        if (printLog >= 3)
           outs () << "initAlloca, decl: " << d->left() << "\n";
         auto & vs = ruleManager.invVars[d->left()];
         for (int i = 0; i < vs.size(); i++)
@@ -118,7 +119,7 @@ namespace ufo
                 isOpX<BVSORT>(typeOf(v)->right()) &&
                 lexical_cast<string>(v) == "_alloc")
             {
-              if (printLog >= 2) outs () << "  alloca arg # "  << i << ": "
+              if (printLog >= 3) outs () << "  alloca arg # "  << i << ": "
                   << v << "   " << typeOf(v) << "\n";
               assert(allocMap[d->left()] == -1);
               allocMap[d->left()] = i;
@@ -127,7 +128,7 @@ namespace ufo
                 isOpX<BVSORT>(typeOf(v)->right()) &&
                 lexical_cast<string>(v) == "_off")
             {
-              if (printLog >= 2) outs () << "  off arg # "  << i << ": "
+              if (printLog >= 3) outs () << "  off arg # "  << i << ": "
                   << v << "   " << typeOf(v) << "\n";
               assert(offMap[d->left()] == -1);
               offMap[d->left()] = i;
@@ -136,7 +137,7 @@ namespace ufo
                 isOpX<BVSORT>(typeOf(v)->right()) &&
                 lexical_cast<string>(v) == "_siz")
             {
-              if (printLog >= 2) outs () << "  siz arg # "  << i << ": "
+              if (printLog >= 3) outs () << "  siz arg # "  << i << ": "
                   << v << "   " << typeOf(v) << "\n";
               assert(sizMap[d->left()] == -1);
               sizMap[d->left()] = i;
@@ -145,7 +146,7 @@ namespace ufo
                      isOpX<ARRAY_TY>(typeOf(v)->right()) &&
                      lexical_cast<string>(v) == "_mem")
             {
-              if (printLog >= 2) outs () << "  mem arg # "  << i << ": "
+              if (printLog >= 3) outs () << "  mem arg # "  << i << ": "
                   << v << "   " << typeOf(v) << "\n";
               if(memMap[d->left()] != -1)
               {
@@ -637,14 +638,13 @@ namespace ufo
           if (printLog >= 2)
           {
             outs () << "aliasCombs empty:\n";
-            pprint(r.body);
+            if (printLog >= 4) pprint(r.body);
           }
         }
         else
         {
           r.body = conjoin(newBodies, m_efac);
-          if (printLog >= 2) pprint(r.body, 4);
-
+          if (printLog >= 4) pprint(r.body, 4);
           // sanity check after repl:
           assert(!contains(r.body, memTy));
         }
@@ -679,10 +679,30 @@ namespace ufo
     }
 
     map<int, map<int, ExprSet>> origs;
-    void addToCandidates(int ind, Expr e, int debugMarker)
+    void addToCandidates(int ind, Expr e, int debugMarker, bool split = true)
     {
+      e = simplifyBool(simplifyBV(e));
       if (find(candidates[ind].begin(), candidates[ind].end(), e) !=
                candidates[ind].end()) return;
+
+      if (split)
+      {
+        ExprSet factored;
+        getConj(factor(e, prj), factored);
+        if (factored.size() > 1)
+        {
+          for (auto & f : factored)
+          {
+            ExprSet dsjs;
+            getDisj (f, dsjs);
+            if (dsjs.size() < 3)
+              addToCandidates(ind, f, debugMarker, false);
+          }
+          return;
+        }
+      }
+      if (isOpX<OR>(e) && e->arity() > 3 /* to amend */) return;
+
       Expr rel = decls[ind];
       Expr lms = conjoin(sfs[ind].back().learnedExprs, m_efac);
       if (u.implies(lms, e)) return;
@@ -702,6 +722,7 @@ namespace ufo
       {
         if (!c.isInductive) continue;
 
+        auto rel = c.srcRelation;
         auto ind = getVarIndex(c.dstRelation, decls);
         auto lems = sfs[ind].back().learnedExprs;
         lems.insert(c.body);
@@ -711,47 +732,43 @@ namespace ufo
         // consider only one-by-one counters
         for (auto i = 0; i < c.srcVars.size(); i++)
         {
-          if (is_bvconst(c.srcVars[i]))
+          Expr var = c.srcVars[i];
+          if (is_bvconst(var))
           {
-            auto ty = typeOf(c.srcVars[i]);
+            auto ty = typeOf(var);
             Expr one = bvnum(mkMPZ(1, m_efac), ty);   // one-by-one counters
-            if (u.implies(strbody, mk<EQ>(mk<BADD>(one, c.srcVars[i]),
-                                         c.dstVars[i])))
+            if (u.implies(strbody, mk<EQ>(mk<BADD>(one, var), c.dstVars[i])))
             {
               if (printLog)
-                outs () << "possibly counter for " << c.srcRelation << ": "
-                        << c.srcVars[i] << "\n";
-              counters[c.srcRelation].insert(c.srcVars[i]);
-              lobounds[c.srcRelation].insert(bvnum(mkMPZ(0, m_efac), ty));
+                outs () << "possibly counter for " << rel << ": " << var << "\n";
+              counters[rel].insert(var);
+              lobounds[rel].insert(bvnum(mkMPZ(0, m_efac), ty)); // TO FIX
             }
 
-            if (u.implies(strbody, mk<EQ>(mk<BSUB>(c.srcVars[i], one),
-                                         c.dstVars[i])))
+            if (u.implies(strbody, mk<EQ>(mk<BSUB>(var, one), c.dstVars[i])))
             {
               if (printLog)
-                outs () << "possibly NEG counter for " << c.srcRelation << ": "
-                        << c.srcVars[i] << "\n";
-              negCounters[c.srcRelation].insert(c.srcVars[i]);
+                outs () << "possibly NEG counter for " << rel << ": " << var << "\n";
+              negCounters[rel].insert(var);
             }
           }
 
-          if (i == offMap[c.srcRelation])
+          if (i == offMap[rel])
           {
-            for (auto & al : aliases[c.srcRelation])
+            for (auto & al : aliases[rel])
             {
               for (auto & a : al.second)
               {
-                auto ty = typeOf(c.srcVars[i])->right();
+                auto ty = typeOf(var)->right();
                 Expr one = bvnum(mkMPZ(1, m_efac), ty); // one-by-one counters
+                Expr sel = mk<SELECT>(var, a);
                 if (u.implies(strbody,
-                         mk<EQ>(mk<BADD>(one, mk<SELECT>(c.srcVars[i], a)),
-                                  mk<SELECT>(c.dstVars[i], a))))
+                         mk<EQ>(mk<BADD>(one, sel), mk<SELECT>(c.dstVars[i], a))))
                 {
                   if (printLog)
-                    outs () << "possibly counter for " << c.srcRelation << ": "
-                            << mk<SELECT>(c.srcVars[i], a)  << "\n";
-                  counters[c.srcRelation].insert(mk<SELECT>(c.srcVars[i], a));
-                  lobounds[c.srcRelation].insert(bvnum(mkMPZ(0, m_efac), ty));
+                    outs () << "possibly counter for " << rel << ": " << sel  << "\n";
+                  counters[rel].insert(sel);
+                  lobounds[rel].insert(bvnum(mkMPZ(0, m_efac), ty)); // TO FIX
                 }
               }
             }
@@ -760,91 +777,47 @@ namespace ufo
       }
     }
 
-    bool simplifyCHCs()
+    void simplifyCHCs()
     {
       if (printLog) outs() << "  Lemma-based CHC simplification\n";
-      bool changed = false;
       for(auto & c : ruleManager.chcs)
       {
         auto b = c.body;
+        ExprSet impls;
+        getImpls(b, impls);
+
         if (!c.isFact)
         {
-          // find implications
-          ExprSet bodySeps, bodyImpls;
-          ExprMap bodyEqs;
-          getConj(b, bodySeps);
-          for (auto it = bodySeps.begin(); it != bodySeps.end(); )
-          {
-            if (isOpX<IMPL>(*it))
-            {
-              bodyImpls.insert(*it);
-              it = bodySeps.erase(it);
-            }
-            else if (isOpX<EQ>(*it) && contains(c.dstVars, (*it)->left()))
-            {
-              bodyEqs[(*it)->left()] = (*it)->right();
-              it = bodySeps.erase(it);
-            }
-            else ++it;
-          }
-
           auto ind = getVarIndex(c.srcRelation, decls);
           auto lems = sfs[ind].back().learnedExprs;
-
-          for (auto & s : bodyImpls)
-          {
-            if (u.implies(conjoin(lems, m_efac), s->left()))
-            {
-              bodySeps.insert(s->right());
-              changed = true;
-            }
-            else if (!u.implies(conjoin(lems, m_efac), mkNeg(s->left())))
-            {
-              bodySeps.insert(s);
-            }
-          }
-
-          ExprSet newBody;
-          for (auto & c : bodySeps)
-          {
-            auto d = replaceAll(c, bodyEqs);
-            if (c != d) changed = true;
-            newBody.insert(d);
-          }
-          for (auto & m : bodyEqs)
-          {
-            newBody.insert(mk<EQ>(m.first, m.second));
-          }
-          newBody.insert(lems.begin(), lems.end());
-
-          b = conjoin(newBody, m_efac);
+          lems.insert(b);
+          b = conjoin(lems, m_efac);
         }
 
-        while(true)
+        if (impls.size() > 0)
         {
-          ExprSet disjs, simplDisjs;
-          getDisj(b, disjs);
-          bool anyProg = false;
-          for (auto & d : disjs)
+          for (auto & a : impls)
           {
-            auto s = simplifyBool(simplifyArr(simplifyBV(d)));
-            s = simpleQE(s, c.locVars);
-            anyProg |= d != s;
-            simplDisjs.insert(s);
+            auto tmp = replaceAll(b, a, a->right());
+            if (u.isEquiv(b, tmp)) b = tmp;
           }
-          if (anyProg)
-          {
-            b = disjoin(simplDisjs, m_efac);
-            changed = true;
-          }
-          else break;
         }
+
+        ExprVector toAvoid;
+        for (auto & v : c.dstVars)
+          if (lexical_cast<string>(v).find("$tmp") != string::npos)
+            toAvoid.push_back(v);
+
+        b = simpleQE(b, c.locVars, toAvoid);
+
+        b = factor(b, norm); // to elaborate on
+
         c.body = b;
 
         if (printLog >= 3)
         {
-          outs () << "   simplified CHC " <<
-                     c.srcRelation << " -> " << c.dstRelation << "\n";
+          outs () << "\n--------\n   Simplified CHC " <<
+                     c.srcRelation << " -> " << c.dstRelation << ":\n";
           ExprSet cnj;
           getConj(b, cnj);
           outs () << " // preconds:\n";
@@ -867,13 +840,13 @@ namespace ufo
           pprint(cnj, 2);
         }
       }
-      return changed;
     }
 
     void preproAdder(Expr a, ExprVector& vars, ExprVector& varsp,
                      int ind, int debugMarker)
     {
-      auto b = rewriteSelectStore(a);
+      auto b = simplifyBV(simplifyArr(a));
+      b = rewriteSelectStore(b);
       b = u.removeITE(b);
       b = keepQuantifiersReplWeak(b, varsp);
       ExprSet cnjs;
@@ -888,15 +861,27 @@ namespace ufo
           if (vars != varsp) bb = replaceAll(bb, varsp, vars);
           addToCandidates(ind, bb, debugMarker);
 
-          if (isOpX<EQ>(bb) && isOpX<SELECT>(bb->left()) &&
-              contains(allArrVars, bb->left()->left()))
+          if (isOpX<EQ>(bb))
           {
-            if (true == u.equalsTo(bb->right(), mkMPZ(0, m_efac)))
+            if (isOpX<SELECT>(bb->left()) && contains(allArrVars, bb->left()->left()))
             {
-              Expr up = bb->left()->right();
-              if (printLog)
-                outs () << "  storing zero at " << up << "\n";
-              upbounds[decls[ind]].insert(up);
+              if (true == u.equalsTo(bb->right(), mkMPZ(0, m_efac)))
+              {
+                Expr up = bb->left()->right();
+                if (printLog)
+                  outs () << "  storing zero at " << up << "\n";
+                upbounds[decls[ind]].insert(up);
+              }
+            }
+            else if (isOpX<SELECT>(bb->right()) && contains(allArrVars, bb->right()->left()))
+            {
+              if (true == u.equalsTo(bb->left(), mkMPZ(0, m_efac)))
+              {
+                Expr up = bb->right()->right();
+                if (printLog)
+                  outs () << "  storing zero at " << up << "\n";
+                upbounds[decls[ind]].insert(up);
+              }
             }
           }
         }
@@ -907,11 +892,33 @@ namespace ufo
     {
       int indDst = getVarIndex(c.dstRelation, decls);
 
-      ExprSet bodyCnjs;
+      ExprSet bodyCnjs, bodyProjs;
       getConj(c.body, bodyCnjs);
+      ExprVector& v = ruleManager.invVarsPrime[c.dstRelation];
 
       for (auto a : bodyCnjs)
       {
+        for (auto it1 = v.begin(); it1 != v.end(); it1++)
+        {
+          for (auto it2 = it1; it2 != (prj > 1 ? v.end() : std::next(it1)); it2++)
+          {
+            for (auto it3 = it2; it3 != (prj > 2 ? v.end() : std::next(it2)); it3++)
+            {
+              if (typeOf(*it1) == typeOf(*it2) && typeOf(*it2) == typeOf(*it3))
+              {
+                ExprSet vars = {*it1, *it2, *it3};
+                bodyProjs.insert(projectOnlyVars(a, vars));
+              }
+            }
+          }
+        }
+      }
+
+      bodyCnjs.insert(bodyProjs.begin(), bodyProjs.end());
+
+      for (auto a : bodyCnjs)
+      {
+        a = simplifyBV(simplifyArr(a));
         preproAdder(a, ruleManager.invVars[c.dstRelation],
                        ruleManager.invVarsPrime[c.dstRelation], indDst, 0);
       }
@@ -922,15 +929,20 @@ namespace ufo
       int indSrc = getVarIndex(c.srcRelation, decls);
 
       ExprSet bodyCnjs, bodyCnjsTmp;
-      getConj(mkNeg(c.body), bodyCnjs);
       getConj(c.body, bodyCnjsTmp);
       for (auto a : bodyCnjsTmp) bodyCnjs.insert(mkNeg(a));
 
-      for (auto a : bodyCnjs)
+      auto & lems = sfs[indSrc].back().learnedExprs;
+      for (auto it = bodyCnjsTmp.begin(); it != bodyCnjsTmp.end();)
       {
+        if (contains(lems, *it)) it = bodyCnjsTmp.erase(it);
+        else ++it;
+      }
+      getConj(mkNeg(conjoin(bodyCnjsTmp, m_efac)), bodyCnjs);
+
+      for (auto a : bodyCnjs)
         preproAdder(a, ruleManager.invVars[c.srcRelation],
                        ruleManager.invVars[c.srcRelation], indSrc, 1);
-      }
     }
 
     void processInd(HornRuleExt& c)
@@ -989,37 +1001,25 @@ namespace ufo
       int indDst = getVarIndex(c.dstRelation, decls);
 
       for (auto & a : bodySEqs)
-      {
         if (true == u.isSat(mk<EQ>(a.first, a.second)))
           preproAdder(mk<EQ>(a.first, a.second),
                        ruleManager.invVars[c.dstRelation],
                        ruleManager.invVars[c.dstRelation], indDst, 28);
-      }
 
       for (auto & a : bodyDEqs)
-      {
         if (true == u.isSat(mk<EQ>(a.first, a.second)))
           preproAdder(mk<EQ>(a.first, a.second),
                        ruleManager.invVars[c.dstRelation],
                        ruleManager.invVars[c.dstRelation], indDst, 28);
-      }
 
       for (auto a : sfs[indSrc].back().learnedExprs)
-      {
         addToCandidates(indDst, replaceAll(a, bodySEqs, 1), 3);
-      }
       for (auto a : sfs[indDst].back().learnedExprs)
-      {
         addToCandidates(indSrc, replaceAll(a, bodyDEqs, 1), 4);
-      }
       for (auto a : candidates[indSrc])
-      {
         addToCandidates(indDst, replaceAll(a, bodySEqs, 1), 5);
-      }
       for (auto a : candidates[indDst])
-      {
         addToCandidates(indSrc, replaceAll(a, bodyDEqs, 1), 6);
-      }
 
       if (cnts)
       {
@@ -1062,6 +1062,42 @@ namespace ufo
             }
           }
         }
+
+        for (auto & cnt1 : counters[c.srcRelation])
+        {
+          for (auto & cnt2 : counters[c.dstRelation])
+          {
+            if (cnt1 == cnt2)
+            {
+              for (auto u1 = upbounds[c.srcRelation].begin(); u1 != upbounds[c.srcRelation].end(); u1++)
+              {
+                for (auto & cnt3 : counters[c.dstRelation])
+                {
+                  if (cnt1 != cnt3)
+                  {
+                    Expr tmp = typeRepair(mk<BADD>(cnt3, *u1));
+                    addToCandidates(indDst, mk<BSLT>(cnt1, tmp), 99);
+                    addToCandidates(indDst, mk<BSLE>(cnt1, tmp), 99);
+                  }
+                }
+                for (auto & cnt3 : negCounters[c.dstRelation])
+                {
+                  if (cnt1 != cnt3)
+                  {
+                    for (auto u2 = std::next(u1); u2 != upbounds[c.srcRelation].end(); u2++)
+                    {
+                      Expr tmp1 = typeRepair(mk<BSUB>(*u1, cnt3));
+                      Expr tmp2 = typeRepair(mk<BADD>(cnt3, *u2));
+                      addToCandidates(indDst, mk<BSLT>(cnt1, tmp2), 99);
+                      addToCandidates(indDst, mk<BSLE>(cnt1, tmp2), 99);
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+
       }
     }
 
@@ -1113,14 +1149,16 @@ namespace ufo
 
     void addRelCntsCands(int ind, Expr d, Expr cnt1, Expr cnt2, int debugMarker)
     {
+      Expr a = typeRepair(mk<BSUB>(cnt1, cnt2));
       for (auto & l: lobounds[d])
       {
         for (auto & u: upbounds[d])
         {
-          Expr t1 = typeRepair(mk<BSUB>(cnt1, cnt2));
-          Expr t2 = typeRepair(mk<BADD>(l, u));
-          addToCandidates(ind, typeRepair(repairBComp(mk<BSLE>(t1, t2))), debugMarker);
-          addToCandidates(ind, typeRepair(repairBComp(mk<BSGE>(t1, t2))), debugMarker);
+          Expr b = typeRepair(mk<BADD>(l, u));
+          addToCandidates(ind, typeRepair(repairBComp<BSLE>(a, b)), debugMarker);
+          addToCandidates(ind, typeRepair(repairBComp<BSGE>(a, b)), debugMarker);
+          addToCandidates(ind, typeRepair(repairBComp<BSLT>(a, b)), debugMarker);
+          addToCandidates(ind, typeRepair(repairBComp<BSGT>(a, b)), debugMarker);
         }
       }
     }
@@ -1131,6 +1169,41 @@ namespace ufo
       {
         auto d = decl->left();
         int ind = getVarIndex(d, decls);
+
+        // get more bounds from lemmas
+        for (auto & c : sfs[ind].back().learnedExprs)
+        {
+          ExprVector cnts;
+          cnts.insert(cnts.end(), counters[d].begin(), counters[d].end());
+          cnts.insert(cnts.end(), negCounters[d].begin(), negCounters[d].end());
+          for (auto & cnt : cnts)
+          {
+            Expr newLBound = NULL, newUBound = NULL;
+            if (isOpX<BUGE>(c) || isOpX<BSGE>(c) || isOpX<BUGT>(c) || isOpX<BSGT>(c))
+            {
+              if (cnt == c->left()) newLBound = c->right();
+              if (cnt == c->right()) newUBound = c->right();
+            }
+            if (isOpX<BULE>(c) || isOpX<BSLE>(c) || isOpX<BULT>(c) || isOpX<BSLT>(c))
+            {
+              if (cnt == c->left()) newUBound = c->right();
+              if (cnt == c->right()) newLBound = c->right();
+            }
+            if (newLBound != NULL)
+            {
+              lobounds[d].insert(newLBound);
+              if (printLog > 1)
+                outs () << " new low bound for " << d << " from lemma: " << newLBound << "\n";
+            }
+            if (newUBound != NULL)
+            {
+              upbounds[d].insert(newUBound);
+              if (printLog > 1)
+                outs () << " new upper bound for " << d << " from lemma: " << newUBound << "\n";
+            }
+          }
+        }
+
         if (printLog > 1)
         {
           outs () << "    lobounds[" << d << "] (" << lobounds[d].size() << "):\n";
@@ -1177,7 +1250,8 @@ namespace ufo
 
           for (auto & cnt1 : counters[d])
             for (auto cnt2 : negCounters[d])
-              addRelCntsCands(ind, d, cnt1, cnt2, 18);
+              addRelCntsCands(ind, d, cnt1,
+                mk<BSUB>(bvnum(mkMPZ(0, m_efac), typeOf(cnt2)), cnt2), 18);
 
           for (auto cnt1 : negCounters[d])
             for (auto cnt2 : negCounters[d])
@@ -1194,6 +1268,8 @@ namespace ufo
               for (auto u : upbounds[d])
                 addToCandidates(ind, typeRepair(mk<BSLE>(cnt, typeRepair(mk<BADD>(l, u)))), 21);
           }
+          for (auto u : upbounds[d])
+            addToCandidates(ind, typeRepair(mk<BSLE>(cnt, u)), 209);
         }
 
         for (auto & cnt : negCounters[d])
@@ -1205,6 +1281,8 @@ namespace ufo
               for (auto l : lobounds[d])
                 addToCandidates(ind, typeRepair(mk<BSLE>(cnt, typeRepair(mk<BADD>(l, u)))), 23);
           }
+          for (auto l : lobounds[d])
+            addToCandidates(ind, typeRepair(mk<BSGE>(cnt, l)), 23);
         }
       }
     }
@@ -1242,26 +1320,334 @@ namespace ufo
       getDataCandidates(chc, extrVars, lems);
     }
 
-    tribool invSyn(int b = 0)
+    template<typename Op1, typename Op2> void cndadd(Expr e1, Expr e2,
+                    ExprVector& cands)
+    {
+      Expr c1 = mk<Op1>(e1, e2);
+      Expr c2 = mk<Op2>(e2, e1);
+      if (contains(cands, c1)) return;
+      if (contains(cands, c2)) return;
+      cands.push_back(c1);
+    }
+
+    void removeDupCandidates()
+    {
+      for (auto & c : candidates)
+      {
+        int sz = c.second.size();
+        map<Expr, ExprSet> eqs;
+        ExprVector tmp;
+        for (auto a : sfs[c.first].back().learnedExprs)
+        {
+          if (isOpX<EQ>(a))
+          {
+            if (!isArray(a->left()))
+            {
+              if (!is_bvnum(a->left()))
+                eqs[a->left()].insert(a->right());
+              if (!is_bvnum(a->right()))
+                eqs[a->right()].insert(a->left());
+            }
+          }
+          else
+          {
+            if (!containsOp<OR>(a) && !containsOp<AND>(a) &&
+                !containsOp<IMPL>(a))
+              tmp.push_back(a);
+          }
+        }
+
+        for (auto & e : eqs)
+        {
+          for (auto & f : e.second)
+          {
+            for (auto & a : tmp)
+            {
+              Expr b = replaceAll(a, e.first, f);
+              if (a != b)
+              {
+                auto it = find(c.second.begin(), c.second.end(), b);
+                if (it != c.second.end()) c.second.erase(it);
+              }
+            }
+
+            set<int> toRem;
+            for (auto & a : c.second)
+            {
+              Expr b = replaceAll(a, e.first, f);
+              if (a != b)
+              {
+                for (int i = 0; i < c.second.size(); i++)
+                {
+                  if (c.second[i] == b)
+                  {
+                    toRem.insert(i);
+                  }
+                }
+              }
+            }
+            for (auto rit = toRem.rbegin(); rit != toRem.rend(); rit++)
+            {
+              c.second.erase(c.second.begin() + *rit);
+            }
+          }
+        }
+        if (printLog > 2)
+          outs () << "  rem dupl: " << sz << " -> " << c.second.size() << "\n";
+      }
+    }
+
+    void mutateCandidates(int round = 0)
+    {
+      candidatesNext = candidates;
+      candidates.clear();
+      for (auto & c : candidatesNext)
+      {
+        map<Expr, ExprSet> eqs;
+        ExprMap ults, slts, ules, sles;
+        ExprVector tmp;
+
+        auto & l = sfs[c.first].back().learnedExprs;
+        for (auto it = c.second.begin(); it != c.second.end(); )
+        {
+          auto a = simplifyBV(*it);
+
+          if (isOpX<EQ>(a))
+          {
+            auto f = find(l.begin(), l.end(), *it);
+            if (f != l.end())
+            {
+              it = c.second.erase(it);
+              continue;
+            }
+
+            candidates[c.first].push_back(a);
+            if (!isArray(a->left()))
+            {
+              if (!is_bvnum(a->left()))
+                eqs[a->left()].insert(a->right());
+              if (!is_bvnum(a->right()))
+                eqs[a->right()].insert(a->left());
+            }
+            it = c.second.erase(it);
+          }
+          else
+          {
+            if (!containsOp<OR>(a) && !containsOp<AND>(a) &&
+                !containsOp<IMPL>(a))
+              tmp.push_back(a);
+
+            if (isOpX<BULT>(a))
+              ults[a->left()] = a->right();
+            if (isOpX<BSLT>(a))
+              slts[a->left()] = a->right();
+            if (isOpX<BUGT>(a))
+              ults[a->right()] = a->left();
+            if (isOpX<BSGT>(a))
+              slts[a->right()] = a->left();
+            if (isOpX<BULE>(a))
+              ules[a->left()] = a->right();
+            if (isOpX<BSLE>(a))
+              sles[a->left()] = a->right();
+            if (isOpX<BUGE>(a))
+              ules[a->right()] = a->left();
+            if (isOpX<BSGE>(a))
+              sles[a->right()] = a->left();
+
+            ++it;
+          }
+        }
+
+        if (round == 0) continue;
+
+        int j = c.second.size();
+
+        for (int i = 0; i < tmp.size(); i++)
+        {
+          auto a = tmp[i];
+          for (auto & e : eqs)
+          {
+            for (auto & f : e.second)
+            {
+              Expr b = replaceAll(a, e.first, f);
+              if (a != b)
+              {
+                if (isOpX<BULT>(a))
+                {
+                  cndadd<BULT, BUGT>(b->left(), b->right(), c.second);
+                  if (round == 2) cndadd<BULT, BUGT>(b->left(), b->right(), tmp);
+                }
+                else if (isOpX<BSLT>(a))
+                {
+                  cndadd<BSLT, BSGT>(b->left(), b->right(), c.second);
+                  if (round == 2) cndadd<BSLT, BSGT>(b->left(), b->right(), tmp);
+                }
+                else if (isOpX<BULE>(a))
+                {
+                  cndadd<BULE, BUGE>(b->left(), b->right(), c.second);
+                  if (round == 2) cndadd<BULE, BUGE>(b->left(), b->right(), tmp);
+                }
+                else if (isOpX<BSLE>(a))
+                {
+                  cndadd<BSLE, BSGE>(b->left(), b->right(), c.second);
+                  if (round == 2) cndadd<BSLE, BSGE>(b->left(), b->right(), tmp);
+                }
+                else if (isOpX<BUGT>(a))
+                {
+                  cndadd<BUGT, BULT>(b->left(), b->right(), c.second);
+                  if (round == 2) cndadd<BUGT, BULT>(b->left(), b->right(), tmp);
+                }
+                else if (isOpX<BSGT>(a))
+                {
+                  cndadd<BSGT, BSLT>(b->left(), b->right(), c.second);
+                  if (round == 2) cndadd<BSGT, BSLT>(b->left(), b->right(), tmp);
+                }
+                else if (isOpX<BUGE>(a))
+                {
+                  cndadd<BUGE, BULE>(b->left(), b->right(), c.second);
+                  if (round == 2) cndadd<BUGE, BULE>(b->left(), b->right(), tmp);
+                }
+                else if (isOpX<BSGE>(a))
+                {
+                  cndadd<BSGE, BSLE>(b->left(), b->right(), c.second);
+                  if (round == 2) cndadd<BSGE, BSLE>(b->left(), b->right(), tmp);
+                }
+                else
+                {
+                  unique_push_back(b, c.second);
+                  if (round == 2) unique_push_back(b, tmp);
+                }
+              }
+            }
+          }
+        }
+
+        j = c.second.size() - j;
+        int j1 = c.second.size();
+
+        // transitivity
+        for (auto & a : ults)
+        {
+          for (auto & b : ults)
+          {
+            if (a.second == b.first)
+            {
+              cndadd<BULT, BUGT>(a.first, b.second, c.second);
+            }
+          }
+        }
+        for (auto & a : slts)
+        {
+          for (auto & b : slts)
+          {
+            if (a.second == b.first)
+            {
+              cndadd<BSLT, BSGT>(a.first, b.second, c.second);
+            }
+          }
+        }
+        for (auto & a : ults)
+        {
+          for (auto & b : ules)
+          {
+            if (a.second == b.first)
+            {
+              cndadd<BULT, BUGT>(a.first, b.second, c.second);
+            }
+          }
+        }
+        for (auto & a : slts)
+        {
+          for (auto & b : sles)
+          {
+            if (a.second == b.first)
+            {
+              cndadd<BSLT, BSGT>(a.first, b.second, c.second);
+            }
+          }
+        }
+        for (auto & a : ules)
+        {
+          for (auto & b : ults)
+          {
+            if (a.second == b.first)
+            {
+              cndadd<BULT, BUGT>(a.first, b.second, c.second);
+            }
+          }
+        }
+        for (auto & a : sles)
+        {
+          for (auto & b : slts)
+          {
+            if (a.second == b.first)
+            {
+              cndadd<BSLT, BSGT>(a.first, b.second, c.second);
+            }
+          }
+        }
+        for (auto & a : ules)
+        {
+          for (auto & b : ules)
+          {
+            if (a.second == b.first)
+            {
+              cndadd<BULE, BUGE>(a.first, b.second, c.second);
+            }
+          }
+        }
+        for (auto & a : sles)
+        {
+          for (auto & b : sles)
+          {
+            if (a.second == b.first)
+            {
+              cndadd<BSLE, BSGE>(a.first, b.second, c.second);
+            }
+          }
+        }
+
+        int sizeEqs = 0;
+        for (auto & e : eqs) sizeEqs += e.second.size();
+
+        if (printLog > 2)
+          outs () << "mut stat: " << tmp.size() << " + " << eqs.size()<< " / "
+                  << sizeEqs << ": " << ults.size() << " + "
+                  << slts.size() << " + "<< ules.size() << " + "<< sles.size()
+                  << " -> " << j << ", " << (c.second.size() - j1)<< "\n";
+      }
+    }
+
+    tribool invSyn(int ser, int b = 0)
     {
       candidates.clear();
       if (b == 0)
       {
         for(auto & c : ruleManager.chcs)
         {
-          if (c.isFact) continue;
-          if (isOpX<IMPL>(c.body))
+          if (!c.isQuery)
           {
-            preproAdder(c.body->left(), ruleManager.invVars[c.srcRelation],
-                         ruleManager.invVars[c.srcRelation],
-                            getVarIndex(c.srcRelation, decls), 100);
+            auto a = allocMap[c.dstRelation];
+            auto av = ruleManager.invVars[c.dstRelation][a];
+            auto avp = ruleManager.invVarsPrime[c.dstRelation][a];
+            u.isSat(c.body);
+            auto mdl = u.getModel(avp);
+            if (avp != mdl)
+            {
+              auto cand = mk<EQ>(av, mdl);
+              addToCandidates(getVarIndex(c.dstRelation, decls), cand, 100);
+
+              ExprSet tmp;
+              getConj(u.removeITE(rewriteSelectStore(cand)), tmp);
+              for (auto & a : tmp)
+                addToCandidates(getVarIndex(c.dstRelation, decls), a, 100);
+            }
           }
         }
       }
       else
       {
-        auto affected = simplifyCHCs();
-        if (!affected) return indeterminate;
+        simplifyCHCs();
 
         if (cnts) countersAnalysis();
         processBounds();
@@ -1280,6 +1666,13 @@ namespace ufo
         }
       }
 
+      if (ser == b + 1)
+      {
+        ruleManager.serialize("chc_optim");
+        ruleManager.print(false, true, "chc_optim");
+        exit(0);
+      }
+
       for (int i = 0; i < ruleManager.decls.size() - 1; i++)
       {
         for (auto & c : ruleManager.chcs)
@@ -1287,18 +1680,30 @@ namespace ufo
             processProp(c);
       }
 
-      if (multiHoudini(ruleManager.allCHCs))
+      auto tmp = candidates;
+      for (int i = 0; i < mutNum; i++)
       {
-        assignPrioritiesForLearned();
-        if (printLog) printStats();
-        if(checkAllLemmas())
+        mutateCandidates(i);
+        for (int j = 0; j < 2; j++)
         {
-          printSolution();
-          return true;
+          if (j > 0) candidates = candidatesNext;
+          removeDupCandidates();
+          auto res = multiHoudini(ruleManager.allCHCs);
+          if (res)
+          {
+            assignPrioritiesForLearned();
+            if (printLog) printStats();
+            if (ser == 0 && checkAllLemmas())
+            {
+              printSolution();
+              return true;
+            }
+          }
         }
+        candidates = tmp;
       }
 
-      return invSyn(b + 1);
+      return invSyn(ser, b + 1);
     }
 
     void printStats()
@@ -1335,19 +1740,18 @@ namespace ufo
       ExprSet v;
       for (auto cit = tmp.begin(); cit != tmp.end(); ++cit)
       {
-        auto & c = *cit;
-        v.insert(repairBComp(c));
+        if (!isOpX<EQ>(*cit)) continue;
+        auto cl = (*cit)->left();
+        auto cr = (*cit)->right();
+        v.insert(repairBComp<EQ>(cl, cr));
         for (auto dit = std::next(cit); dit != tmp.end(); ++dit)
         {
-          auto & d = *dit;
-          v.insert(repairBComp(mk<EQ>(mk<BSUB>(c->left(), d->left()),
-                                     (mk<BSUB>(c->right(), d->right())))));
-          v.insert(repairBComp(mk<EQ>(mk<BSUB>(c->left(), d->right()),
-                                     (mk<BSUB>(c->left(), d->right())))));
-          v.insert(repairBComp(mk<EQ>(mk<BADD>(c->left(), d->left()),
-                                     (mk<BADD>(c->right(), d->right())))));
-          v.insert(repairBComp(mk<EQ>(mk<BADD>(c->left(), d->right()),
-                                     (mk<BADD>(c->left(), d->right())))));
+          auto dl = (*dit)->left();
+          auto dr = (*dit)->right();
+          v.insert(repairBComp<EQ>(mk<BSUB>(cl, dl), mk<BSUB>(cr, dr)));
+          v.insert(repairBComp<EQ>(mk<BSUB>(cl, dr), mk<BSUB>(cr, dl)));
+          v.insert(repairBComp<EQ>(mk<BADD>(cl, dl), mk<BADD>(cr, dr)));
+          v.insert(repairBComp<EQ>(mk<BADD>(cl, dr), mk<BADD>(cr, dl)));
         }
       }
       tmp.clear();
@@ -1392,15 +1796,21 @@ namespace ufo
       }
       ruleManager.doElim(false, simplCHCs);
     }
+
+    int getStat()
+    {
+      return u.getStat();
+    }
   };
 
   inline void process(string smt,
-                      map<int, string>& varIds,  // obsolete, to remove
-                      bool memsafety, bool dat, int cnt, bool serial, int debug,
-                      int mem, int to)
+                map<int, string>& varIds,  // obsolete, to remove
+                bool memsafety, int norm, bool dat, int cnt, int mut, int prj,
+                int serial, int debug, int mem, int to)
   {
     ExprFactory m_efac;
     EZ3 z3(m_efac);
+
     CHCs ruleManager(m_efac, z3, memsafety, debug - 2);
     ruleManager.parse(smt, mem);
 
@@ -1408,7 +1818,7 @@ namespace ufo
     {
       outs () << "Original CHCs:\n";
       outs () << "(size: " << ruleManager.chcs.size() << ", "
-                         << ruleManager.decls.size() << ")\n";
+                           << ruleManager.decls.size() << ")\n";
       ruleManager.print(false, (debug > 2), "chc_orig");
       if (serial) ruleManager.serialize("chc_orig");
     }
@@ -1432,7 +1842,8 @@ namespace ufo
       return;
     }
 
-    MemProcessor ds(m_efac, z3, ruleManager, dat, cnt, varIds, debug, to);
+    MemProcessor ds(m_efac, z3, ruleManager,
+                      norm, dat, cnt, mut, prj, varIds, debug, to);
 
     for (auto dcl : ruleManager.decls)
       ds.initializeDecl(dcl->left());
@@ -1473,15 +1884,12 @@ namespace ufo
                               << ruleManager.decls.size() << "\n";
     }
 
-    if (serial)
+    if (ds.invSyn(serial))
     {
-      ruleManager.serialize("chc_optim");
-      ruleManager.print(false, true, "chc_optim");
-      return;
-    }
-
-    if (ds.invSyn())
       errs() << "sat\n";
+      outs() << "Total # of SMT calls: " <<
+                (ruleManager.getStat() + ds.getStat()) << "\n";
+    }
     else
       errs() << "unknown\n";
   }

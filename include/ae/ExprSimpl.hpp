@@ -140,6 +140,31 @@ namespace ufo
     return true;
   }
 
+  inline static Expr reorientEquality (Expr f)
+  {
+    if (isOpX<EQ>(f))
+      if (lexical_cast<string>(f->left()) > lexical_cast<string>(f->right()))
+         return mk<EQ>(f->right(), f->left());
+    return f;
+  }
+
+  inline static void reorientEqualities(ExprSet& flas)
+  {
+    ExprSet nflas;
+    for (auto it = flas.begin(); it != flas.end(); )
+    {
+      auto a = reorientEquality(*it);
+      if (a == *it) ++it;
+      else
+      {
+        nflas.insert(a);
+        it = flas.erase(it);
+      }
+    }
+    flas.insert(nflas.begin(), nflas.end());
+  }
+
+  // aux method, not not be used externally
   inline static void distribDisjoin(ExprSet& dsj1, ExprSet& dsj2, ExprSet& comm)
   {
     for (auto it1 = dsj1.begin(); it1 != dsj1.end(); )
@@ -176,18 +201,19 @@ namespace ufo
   {
     if (d.size() <= 1) return disjoin(d, efac);
 
-    ExprSet comm;
     vector<ExprSet> dsjs;
-    dsjs.push_back(ExprSet());
-    auto it = d.begin();
-    getConj(*it, dsjs.back());
-    comm = dsjs.back();
-    for (it = std::next(it); it != d.end(); ++it)
+    for (auto &f : d)
+    {
+      dsjs.push_back(ExprSet());
+      getConj(f, dsjs.back());
+      reorientEqualities(dsjs.back());
+    }
+
+    ExprSet comm = dsjs[0];
+    for (int i = 1; i < dsjs.size(); i++)
     {
       ExprSet updComm, tmp;
-      dsjs.push_back(ExprSet());
-      getConj(*it, dsjs.back());
-      tmp = dsjs.back();
+      tmp = dsjs[i];
       distribDisjoin (comm, tmp, updComm);
       comm = updComm;
     }
@@ -354,6 +380,15 @@ namespace ufo
     } else {
       ops.push_back(a);
     }
+  }
+
+  inline static void getImpls (Expr a, ExprSet &flas)
+  {
+    if (isOpX<IMPL>(a))
+      flas.insert(a);
+    else
+      for (unsigned i = 0; i < a->arity(); i++)
+        getImpls(a->arg(i), flas);
   }
 
   /**
@@ -802,6 +837,14 @@ namespace ufo
       return mk<BULT>(lhs, rhs);
     if (isOpX<BULE>(fla))
       return mk<BULE>(lhs, rhs);
+    if (isOpX<BSGT>(fla))
+      return mk<BSGT>(lhs, rhs);
+    if (isOpX<BSGE>(fla))
+      return mk<BSGE>(lhs, rhs);
+    if (isOpX<BSLT>(fla))
+      return mk<BSLT>(lhs, rhs);
+    if (isOpX<BSLE>(fla))
+      return mk<BSLE>(lhs, rhs);
     assert(0);
   }
 
@@ -859,25 +902,15 @@ namespace ufo
   inline static bool evaluateCmpConsts(Expr fla, cpp_int a, cpp_int b)
   {
     if (isOpX<EQ>(fla))
-    {
       return (a == b);
-    }
     if (isOpX<NEQ>(fla))
-    {
       return (a != b);
-    }
     if (isOpX<LEQ>(fla))
-    {
       return (a <= b);
-    }
     if (isOpX<GEQ>(fla))
-    {
       return (a >= b);
-    }
     if (isOpX<LT>(fla))
-    {
       return (a < b);
-    }
     assert(isOpX<GT>(fla));
     return (a > b);
   }
@@ -885,59 +918,44 @@ namespace ufo
   inline static Expr mkNeg(Expr fla)
   {
     if (isOpX<NEG>(fla))
-    {
       return fla->arg(0);
-    }
     else if (isOpX<FALSE>(fla))
-    {
       return mk<TRUE>(fla->getFactory());
-    }
     else if (isOpX<TRUE>(fla))
-    {
       return mk<FALSE>(fla->getFactory());
-    }
     else if (isOpX<AND>(fla) || isOpX<OR>(fla))
     {
       ExprSet args;
-      for (int i = 0; i < fla->arity(); i++){
+      for (int i = 0; i < fla->arity(); i++)
         args.insert(mkNeg(fla->arg(i)));
-      }
       return isOpX<AND>(fla) ?
         disjoin(args, fla->getFactory()) :
         conjoin (args, fla->getFactory());
     }
     else if (isOpX<ITE>(fla))
-    {
       return mk<ITE>(fla->arg(0), mkNeg(fla->arg(1)), mkNeg(fla->arg(2)));
-    }
     else if (isOpX<XOR>(fla) && fla->arity() == 2)
-    {
       return mk<EQ>(fla->arg(0), fla->arg(1));
-    }
     else if (isOp<ComparissonOp>(fla))
-    {
       return reBuildNegCmp(fla, fla->arg(0), fla->arg(1));
-    }
     else if (isOpX<BUGT>(fla))
-    {
       return mk<BULE>(fla->arg(0), fla->arg(1));
-    }
     else if (isOpX<BUGE>(fla))
-    {
       return mk<BULT>(fla->arg(0), fla->arg(1));
-    }
     else if (isOpX<BULT>(fla))
-    {
       return mk<BUGE>(fla->arg(0), fla->arg(1));
-    }
     else if (isOpX<BULE>(fla))
-    {
       return mk<BUGT>(fla->arg(0), fla->arg(1));
-    }
+    else if (isOpX<BSGT>(fla))
+      return mk<BSLE>(fla->arg(0), fla->arg(1));
+    else if (isOpX<BSGE>(fla))
+      return mk<BSLT>(fla->arg(0), fla->arg(1));
+    else if (isOpX<BSLT>(fla))
+      return mk<BSGE>(fla->arg(0), fla->arg(1));
+    else if (isOpX<BSLE>(fla))
+      return mk<BSGT>(fla->arg(0), fla->arg(1));
     else if (isOpX<IMPL>(fla))
-    {
       return mk<AND>(fla->left(), mkNeg(fla->right()));
-    }
     else if (isOpX<FORALL>(fla) || isOpX<EXISTS>(fla))
     {
       ExprVector args;
@@ -1344,20 +1362,14 @@ namespace ufo
 
       if (isOpX<OR>(exp))
       {
-        ExprSet dsjs;
-        ExprSet newDsjs;
+        ExprSet dsjs, newDsjs;
         getDisj(exp, dsjs);
         for (auto a : dsjs)
         {
-          a = simplifyBool(a);
           if (isOpX<TRUE>(a))
-          {
             return mk<TRUE>(efac);
-          }
           if (isOpX<FALSE>(a))
-          {
             continue;
-          }
           newDsjs.insert(a);
         }
         if (newDsjs.size() == 2)
@@ -1698,7 +1710,7 @@ namespace ufo
   }
 
   // simplification based on boolean replacements
-  template<typename Range> static void constantPropagation(Range& hardVars, ExprSet& cnjs, bool doArithm = true)
+  template<typename Range> static void constantPropagation(Range& hardVars, ExprSet& cnjs, bool doArithm = false)
   {
     ExprMap repls;
     constantPropagationRec(hardVars, cnjs, repls, doArithm);
@@ -1852,6 +1864,88 @@ namespace ufo
     ExprSet allVars;
     getExtraVars(fla, vars, allVars);
     return allVars.empty();
+  }
+
+  struct ProjectOnlyVars
+  {
+    ExprSet& vars;
+    ProjectOnlyVars (ExprSet& _vars) : vars(_vars) {};
+
+    Expr operator() (Expr exp)
+    {
+      if (containsOp<AND>(exp) || containsOp<OR>(exp)) return exp;
+      ExprSet av;
+      filter (exp, IsConst (), inserter(av, av.begin()));
+
+      if (isSubset(av, vars) || !isBoolean(exp)) return exp;
+      return mk<TRUE>(exp->getFactory());
+    }
+  };
+
+  inline static Expr projectOnlyVars (Expr exp, ExprSet& v)
+  {
+    RW<ProjectOnlyVars> pv(new ProjectOnlyVars(v));
+    auto e = dagVisit (pv, exp);
+    return simplifyBool(e);
+  }
+
+  struct ReplaceNext
+  {
+    Expr s, t, &p, &r;
+    int num, &c;
+
+    ReplaceNext (Expr _s, Expr _t,  int _num, int& _c, Expr& _p, Expr& _r) :
+                    s(_s),   t(_t), num(_num),   c(_c),    p(_p),    r(_r) {}
+
+    Expr operator() (Expr exp)
+    {
+      ExprVector newArgs;
+      bool toChange = false;
+      for (int i = 0; i < exp->arity(); i++)
+      {
+        newArgs.push_back(exp->arg(i));
+        if (exp->arg(i) == s)
+        {
+          if (c == num)
+          {
+            toChange = true;
+            newArgs.back() = t;
+          }
+          c++;
+        }
+      }
+      if (toChange)
+      {
+        p = exp;
+        r = exp->getFactory().mkNary(exp->op(), newArgs.begin(), newArgs.end());
+      }
+      return exp;
+    }
+  };
+
+  inline static void getSingleReplacements (Expr e, Expr s, Expr t, ExprSet& c)
+  {
+    int a = 0;
+    if (s == e)
+    {
+      c.insert(t);
+      return;
+    }
+    ExprVector ps, rs;
+
+    while (true)
+    {
+      int b = 0;
+      Expr p = NULL, r = NULL;
+      RW<ReplaceNext> rav(new ReplaceNext(s, t, a, b, p, r));
+      dagVisit (rav, e);
+      if (p == NULL) break;
+      ps.push_back(p);
+      rs.push_back(r);
+      a++;
+    }
+    for (int i = 0; i < ps.size(); i++)
+      getSingleReplacements(e, ps[i], rs[i], c);
   }
 
   static Expr rewriteMultAdd (Expr exp);
@@ -2766,7 +2860,7 @@ namespace ufo
       // to avoid this, try unfoldITE first
       if (containsOp<ITE>(exp)) return exp;
 
-      Expr sel, val;
+      Expr sel = NULL, val = NULL;
       if (isOpX<EQ>(exp))
       {
         if (isOpX<STORE>(exp->right())) { sel = exp->right(); val = exp->left(); }
@@ -2864,19 +2958,101 @@ namespace ufo
     return mkQFla(def, vars, forall);
   }
 
+  // create more disjunctions than getDisj (but not necessarily DNF)
+  static Expr disjunctify(Expr fla, int threshold = 1000)
+  {
+    ExprSet dsjs, fin;
+    getDisj(fla, dsjs);
+    for (auto & d : dsjs)
+    {
+      if (isOpX<TRUE>(d)) // cnjs will be empty
+      {
+        fin = {d};
+        break;
+      }
+      ExprSet cnjs, res;
+      getConj(d, cnjs);
+      for (auto c : cnjs)
+      {
+        ExprSet dsjs2, res2;
+        if (isOpX<OR>(c))
+          getDisj(disjunctify(c, threshold), dsjs2);
+        else
+          dsjs2.insert(c);
+
+        if (res.empty())
+          res2 = dsjs2;
+        else if (dsjs2.empty())
+          res2 = res;
+        else
+        {
+          if (threshold < fin.size() + (res.size()*dsjs2.size()))
+            return fla;     // give up
+          for (auto & r : res)
+            for (auto & d2 : dsjs2)
+              res2.insert(mk<AND>(r, d2));
+        }
+        res = res2;
+      }
+      fin.insert(res.begin(), res.end());
+    }
+    return disjoin(fin, fla->getFactory());
+  }
+
+  static Expr factor(Expr e, int times = 3)
+  {
+    ExprSet dsjs;
+    getDisj(disjunctify(e), dsjs);
+    if (dsjs.size() <= 1) return e;
+
+    for (int n = 0; n < times; n++)
+    {
+      ExprSet dsjs2;
+      for (auto & d : dsjs)
+      {
+        ExprSet cnjs, mut;
+        getConj(d, cnjs);
+
+        if (cnjs.size() < 100)    // threshold
+          for (auto & c1 : cnjs)
+          {
+            if (isOpX<EQ>(c1))
+            {
+              if (c1->left() == c1->right()) continue;
+              for (auto & c2 : cnjs)
+              {
+                if (c1 == c2) continue;
+
+                getSingleReplacements (c2, c1->left(), c1->right(), mut);
+                getSingleReplacements (c2, c1->right(), c1->left(), mut);
+              }
+            }
+          }
+        cnjs.insert(mut.begin(), mut.end());
+        dsjs2.insert(conjoin(cnjs, e->getFactory()));
+      }
+      dsjs = dsjs2;
+    }
+    return distribDisjoin(dsjs, e->getFactory());
+  }
+
+  void pprint(Expr exp, int inden, bool upper);
+
   // rewrite just equalities
-  template<typename Range> static Expr simpleQE(Expr exp, Range& quantified)
+  template<typename Range> static Expr simpleQE(Expr exp, Range& quantified,
+      ExprVector& toAvoid, bool dnfize = true)
   {
     ExprFactory& efac = exp->getFactory();
     ExprSet cnjsSet, dsjsSet;
-    getDisj(exp, dsjsSet);
-    if (dsjsSet.size() > 1)
     {
-      ExprSet newDsjs;
-      for (auto & d : dsjsSet) newDsjs.insert(simpleQE(d, quantified));
-      return disjoin(newDsjs, efac);
+      getDisj(dnfize ? disjunctify(exp) : exp, dsjsSet);
+      if (dsjsSet.size() > 1)
+      {
+        ExprSet newDsjs;
+        for (auto & d : dsjsSet) newDsjs.insert(simpleQE(d, quantified, toAvoid, 0));
+        return distribDisjoin(newDsjs, efac);
+      }
     }
-
     getConj(exp, cnjsSet);
     ExprVector cnjs;
     ineqMerger(cnjsSet, true);
@@ -2884,7 +3060,6 @@ namespace ufo
     for (auto & var : quantified)
     {
       ExprSet eqs;
-
       for (unsigned it = 0; it < cnjs.size(); )
       {
         Expr cnj = cnjs[it];
@@ -2956,35 +3131,86 @@ namespace ufo
 
       if (eqs.empty()) continue;
 
-      Expr repl = *eqs.begin();
-      bool no_qv = emptyIntersect(repl, quantified);
-      int min_sz = treeSize(repl);
-      int is_const = isOpX<MPZ>(repl);
+      Expr repl = NULL;
+      bool no_qv1 = false;
+      int min_sz1 = numeric_limits<int>::max();
+      bool is_const1 = 1;
+
+      // zero, check for preferred
+      for (auto eq = eqs.begin(); eq != eqs.end(); eq++) {
+        bool no_qv_cur = emptyIntersect(*eq, quantified) &&
+                         emptyIntersect(*eq, toAvoid);
+        int sz_cur = treeSize(*eq);
+        bool is_const_cur = isOpX<MPZ>(*eq);
+        if (no_qv1 < no_qv_cur || (no_qv_cur && is_const1) || (sz_cur < min_sz1 && !is_const_cur)) {
+          repl = *eq;
+          min_sz1 = sz_cur;
+          no_qv1 = no_qv_cur;
+          is_const1 = is_const_cur;
+        }
+      }
 
       // first, search for a non-constant replacement without quantified vars, if possible
-      for (auto cnj = std::next(eqs.begin()); cnj != eqs.end(); cnj++) {
-        bool no_qv_cur = emptyIntersect(*cnj, quantified);
-        int sz_cur = treeSize(*cnj);
-        int is_const_cur = isOpX<MPZ>(*cnj);
-        if (no_qv < no_qv_cur || (no_qv_cur && is_const) || (sz_cur < min_sz && !is_const_cur)) {
-          repl = *cnj;
-          min_sz = sz_cur;
-          no_qv = no_qv_cur;
-          is_const = is_const_cur;
+      if (repl == NULL)
+      {
+        repl = *eqs.begin();
+        bool no_qv = emptyIntersect(repl, quantified);
+        int min_sz = treeSize(repl);
+        bool is_const = isOpX<MPZ>(repl);
+
+        for (auto eq = std::next(eqs.begin()); eq != eqs.end(); eq++) {
+          bool no_qv_cur = emptyIntersect(*eq, quantified);
+          int sz_cur = treeSize(*eq);
+          bool is_const_cur = isOpX<MPZ>(*eq);
+          if (no_qv < no_qv_cur || (no_qv_cur && is_const) || (sz_cur < min_sz && !is_const_cur)) {
+            repl = *eq;
+            min_sz = sz_cur;
+            no_qv = no_qv_cur;
+            is_const = is_const_cur;
+          }
         }
       }
 
       // second, make sure that all replacements are equal
-      for (auto cnj = eqs.begin(); cnj != eqs.end(); cnj++)
-        if (*cnj != repl) cnjs.push_back(mk<EQ>(repl, *cnj));
+      for (auto eq = eqs.begin(); eq != eqs.end(); eq++)
+        if (*eq != repl) cnjs.push_back(mk<EQ>(repl, *eq));
 
       // finally, replace the remaining cnjs
       for (unsigned it = 0; it < cnjs.size(); it++)
         cnjs[it] = replaceAll(cnjs[it], var, repl);
-
     }
 
-    return conjoin(cnjs, exp->getFactory());
+    // to avoid:
+    ExprMap finalRepl;
+    for (auto & a : toAvoid)
+    {
+      for (auto & cnj : cnjs)
+      {
+        if (isOpX<EQ>(cnj) && cnj->left() == a &&
+            emptyIntersect(cnj->right(), toAvoid))
+        {
+          finalRepl[a] = cnj->right();
+          finalRepl[cnj->right()] = a;
+          break;
+        }
+        if (isOpX<EQ>(cnj) && cnj->right() == a &&
+            emptyIntersect(cnj->left(), toAvoid))
+        {
+          finalRepl[a] = cnj->left();
+          finalRepl[cnj->left()] = a;
+          break;
+        }
+      }
+    }
+
+    return replaceAll(conjoin(cnjs, exp->getFactory()), finalRepl, 0);
+  }
+
+  template<typename Range> static Expr simpleQE(Expr exp, Range& quantified,
+      bool dnfize = true)
+  {
+    ExprVector toAvoid;
+    return simpleQE(exp, quantified, toAvoid, dnfize);
   }
 
   struct QESubexpr
@@ -4589,8 +4815,6 @@ namespace ufo
       assert(0);
     }
   }
-
-  void pprint(Expr exp, int inden, bool upper);
 
   void pprint(ExprMap & e)
   {

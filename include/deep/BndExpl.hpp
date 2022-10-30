@@ -2,7 +2,7 @@
 #define BNDEXPL__HPP__
 
 #include "Horn.hpp"
-#include "Distribution.hpp"
+#include "ae/ExprSimplBv.hpp"
 #include "ae/AeValSolver.hpp"
 #include <limits>
 
@@ -42,21 +42,6 @@ namespace ufo
 
     map<Expr, ExprSet> concrInvs;
     set<vector<int>> unsat_prefs;
-
-    void guessRandomTrace(vector<int>& trace)
-    {
-      std::srand(std::time(0));
-      Expr curRel = mk<TRUE>(m_efac);
-
-      while (curRel != ruleManager.failDecl)
-      {
-        int range = ruleManager.outgs[curRel].size();
-        int chosen = guessUniformly(range);
-        int chcId = ruleManager.outgs[curRel][chosen];
-        curRel = ruleManager.chcs[chcId].dstRelation;
-        trace.push_back(chcId);
-      }
-    }
 
     bool already_unsat(vector<int>& t)
     {

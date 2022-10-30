@@ -14,6 +14,7 @@
 
 #include "Horn.hpp"
 #include "BndExpl.hpp"
+#include "../ae/ExprSimplBv.hpp"
 
 using namespace std;
 using namespace boost;
@@ -304,7 +305,7 @@ namespace ufo
     void
     addpolytocands(ExprSet & cands, Expr poly)
     {
-      cands.insert(poly);
+      cands.insert(simplifyBV(poly));
     }
 
     void

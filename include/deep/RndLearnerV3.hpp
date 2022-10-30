@@ -26,13 +26,14 @@ namespace ufo
   static bool (*weakeningPriorities[])(Expr, tribool) =
   {
     [](Expr cand, tribool val) { return bool(!val); },
-    [](Expr cand, tribool val) { return indeterminate(val) && containsOp<FORALL>(cand); },
+    [](Expr cand, tribool val) { return indeterminate(val) &&
+          (containsOp<EXISTS>(cand) || containsOp<FORALL>(cand)); },
     [](Expr cand, tribool val) { return indeterminate(val); }
   };
 
   class RndLearnerV3 : public RndLearnerV2
   {
-    private:
+    protected:
 
     ExprSet checked;
     set<HornRuleExt*> propped;
@@ -60,8 +61,6 @@ namespace ufo
     map<int, Expr> ssas;
     map<int, Expr> prefs;
     map<int, ExprSet> mbps;
-
-    protected:
 
     map<int, ExprVector> candidates;
     map<int, vector<ArrAccessIter* >> qvits; // per cycle
@@ -998,7 +997,11 @@ namespace ufo
         if (cond(*it, vals[*it]))
         {
           weakened = true;
-          if (printLog >= 3) outs () << "    Failed cand for " << hr->dstRelation << ": " << *it << " 🔥\n";
+          if (printLog >= 2)
+          {
+            outs () << "    Failed cand for " << hr->dstRelation << ": " << *it << " 🔥\n";
+          }
+
           if (hr->isFact && !containsOp<ARRAY_TY>(*it) && !containsOp<BOOL_TY>(*it) && !findNonlin(*it))
           {
             Expr failedCand = normalizeDisj(*it, invarVarsShort[invNum]);
@@ -1639,7 +1642,8 @@ namespace ufo
       {
         auto & hr = *ruleManager.wtoCHCs[i];
         tribool b = checkCHC(hr, candidates, true);
-        if (b) {
+        if (b)
+        {
           if (!hr.isQuery)
           {
             if (printLog) outs() << "WARNING: Something went wrong" <<
@@ -1659,7 +1663,18 @@ namespace ufo
             return false;
           }
           else
+          {
+            if (printLog > 2)
+            {
+              outs () << "SAFETY broken:\n";
+              if (u.canGetModel())
+              {
+                Expr mdl = u.getModel();
+                pprint(mdl);
+              }
+            }
             return false; // TODO: use this fact somehow
+          }
         }
         else if (indeterminate(b)) return false;
       }
@@ -1675,7 +1690,7 @@ namespace ufo
       {
         if (dstNum < 0)
         {
-          if (printLog >= 3) outs () << "      Trivially true since " << hr.dstRelation << " is not initialized\n";
+          if (printLog >= 4) outs () << "      Trivially true since " << hr.dstRelation << " is not initialized\n";
           return false;
         }
         if (checkAll && annotations[dstNum].empty())
@@ -1687,10 +1702,11 @@ namespace ufo
       if (!hr.isFact)
       {
         ExprSet lms = sfs[srcNum].back().learnedExprs;
-        for (auto & a : annotations[srcNum]) lms.insert(a);
+        lms.insert(annotations[srcNum].begin(), annotations[srcNum].end());
         for (auto a : lms)
         {
-          for (auto & v : invarVars[srcNum]) a = replaceAll(a, v.second, hr.srcVars[v.first]);
+          for (auto & v : invarVars[srcNum])
+            a = replaceAll(a, v.second, hr.srcVars[v.first]);
           exprs.insert(a);
         }
       }
@@ -1699,14 +1715,21 @@ namespace ufo
       {
         ExprSet lms = sfs[dstNum].back().learnedExprs;
         ExprSet negged;
-        for (auto & a : annotations[dstNum]) lms.insert(a);
+        lms.insert(annotations[dstNum].begin(), annotations[dstNum].end());
         for (auto a : lms)
         {
-          for (auto & v : invarVars[dstNum]) a = replaceAll(a, v.second, hr.dstVars[v.first]);
+          for (auto & v : invarVars[dstNum])
+            a = replaceAll(a, v.second, hr.dstVars[v.first]);
           negged.insert(mkNeg(a));
         }
         exprs.insert(disjoin(negged, m_efac));
       }
+      return wrapSMT(hr, exprs);
+    }
+
+    // could be redefined and extra tricks added
+    virtual tribool wrapSMT(HornRuleExt& hr, ExprSet& exprs)
+    {
       return u.isSat(exprs);
     }
 
@@ -2026,12 +2049,13 @@ namespace ufo
       if (!qvits[invNum].empty()) ruleManager.hasArrays[rel] = true;
     }
 
-    void printCands()
+    void printCands(bool proof = false)
     {
       for (auto & c : candidates)
         if (c.second.size() > 0)
         {
-          outs() << "  Candidates for " << *decls[c.first] << ":\n";
+          outs() << (proof ? "  Invariants for " : "  Candidates for ")
+                 << *decls[c.first] << ":\n";
           pprint(c.second, 4);
         }
     }

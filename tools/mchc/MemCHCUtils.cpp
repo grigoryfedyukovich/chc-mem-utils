@@ -56,7 +56,10 @@ int main (int argc, char ** argv)
   const char *OPT_HELP = "--help";
   const char *OPT_DAT = "--data";
   const char *OPT_CNT = "--counters";
+  const char *OPT_MUT = "--mut";
+  const char *OPT_PRJ = "--prj";
   const char *OPT_MEM = "--mem";
+  const char *OPT_NORM = "--norm";
   const char *OPT_MSAF = "--memsafety";
   const char *OPT_TO = "--to";
   const char *OPT_SER = "--serialize";
@@ -64,7 +67,7 @@ int main (int argc, char ** argv)
   if (getBoolValue(OPT_HELP, false, argc, argv) || argc == 1)
   {
     outs () <<
-        "* * *                                 MemCHCUtils v.0.1 - Copyright (C) 2022.                                 * * *\n" <<
+        "* * *                                 MemCHCUtils v.0.2 - Copyright (C) 2022.                                 * * *\n" <<
         "                                    Based on FreqHorn. Grigory Fedyukovich et al.                                   \n\n" <<
         "Usage:                          Purpose:\n" <<
         "  mchc [options] <file.smt2>      simplify CHCs and serialize to `chc.smt2`\n\n" <<
@@ -76,10 +79,13 @@ int main (int argc, char ** argv)
 
   int debug = getIntValue(OPT_DEBUG, 0, argc, argv);
   bool mem = getBoolValue(OPT_MEM, false, argc, argv);
-  bool serial = getBoolValue(OPT_SER, false, argc, argv);
+  int serial = getIntValue(OPT_SER, 0, argc, argv);
   bool memsaf = getBoolValue(OPT_MSAF, false, argc, argv);
   bool dat = getBoolValue(OPT_DAT, false, argc, argv);
   int cnt = getIntValue(OPT_CNT, 0, argc, argv);
+  int mut = getIntValue(OPT_MUT, 2, argc, argv);
+  int norm = getIntValue(OPT_NORM, 0, argc, argv);
+  int prj = getIntValue(OPT_PRJ, 3, argc, argv);
   int to = getIntValue(OPT_TO, (cnt >= 2) ? 20000 : 700, argc, argv);
 
   //get names
@@ -102,6 +108,7 @@ int main (int argc, char ** argv)
     }
   }
 
-  process(string(argv[argc-1]), var_ids, memsaf, dat, cnt, serial, debug, mem, to);
+  process(string(argv[argc-1]), var_ids, memsaf, norm, dat,
+              cnt, mut, prj, serial, debug, mem, to);
   return 0;
 }

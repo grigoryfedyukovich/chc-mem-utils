@@ -12,12 +12,22 @@ using namespace boost::multiprecision;
 
 namespace ufo
 {
+  template<typename Range> static Expr eraseLexicogrMinimal(Range& exprs)
+  {
+    auto cur = exprs.begin();
+    for (auto it = std::next(cur); it != exprs.end(); ++it)
+      if (lexical_cast<string>(*cur) > lexical_cast<string>(*it)) cur = it;
+    Expr res = *cur;
+    exprs.erase(cur);
+    return res;
+  }
+
   template<typename Range> static Expr mkbadd(Range& terms, Expr ty, ExprFactory &efac){
     if (terms.empty()) return bvnum(mkMPZ (0, efac), ty);
     if (terms.size() == 1) return *terms.begin();
-    Expr tmp = mk<BADD>(terms[0], terms[1]);
-    for (int i = 2; i < terms.size(); i++)
-      tmp = mk<BADD>(tmp, terms[i]);
+    Expr tmp = mk<BADD>(eraseLexicogrMinimal(terms), eraseLexicogrMinimal(terms));
+    while (!terms.empty())
+      tmp = mk<BADD>(tmp, eraseLexicogrMinimal(terms));
     return tmp;
   }
 
@@ -70,13 +80,13 @@ namespace ufo
     return mk<BSEXT> (v, bvs);
   }
 
-  inline static void getBaddTerm (Expr a, ExprVector &ptrms, ExprVector &ntrms)
+  inline static void getBAddTerm (Expr a, ExprVector &ptrms, ExprVector &ntrms)
   {
     if (isOpX<BSEXT>(a))
     {
       Expr bvs = a->last();
       ExprVector p, n;
-      getBaddTerm(a->left(), p, n);
+      getBAddTerm(a->left(), p, n);
       for (auto & t : p) ptrms.push_back(ssext(t, bvs));
       for (auto & t : n) ntrms.push_back(ssext(t, bvs));
     }
@@ -84,14 +94,14 @@ namespace ufo
     {
       for (auto it = a->args_begin (); it != a->args_end (); ++it)
       {
-        getBaddTerm(*it, ptrms, ntrms);
+        getBAddTerm(*it, ptrms, ntrms);
       }
     }
     else if (isOpX<BSUB>(a))
     {
       assert(a->arity() == 2);
-      getBaddTerm(a->left(), ptrms, ntrms);
-      getBaddTerm(a->right(), ntrms, ptrms);
+      getBAddTerm(a->left(), ptrms, ntrms);
+      getBAddTerm(a->right(), ntrms, ptrms);
     }
     else
     {
@@ -135,22 +145,22 @@ namespace ufo
     return comm;
   }
 
-  inline static void simplifyBterm (Expr a, ExprVector& ptrms,
+  inline static void simplifyBTerm (Expr a, ExprVector& ptrms,
       ExprVector& ntrms, cpp_int & comm)
   {
-    getBaddTerm(a, ptrms, ntrms);
+    getBAddTerm(a, ptrms, ntrms);
     comm += filterVec(ptrms);
     comm -= filterVec(ntrms);
   }
 
-  inline static Expr repairBComp (Expr a)
+  template<typename OP> static Expr repairBComp (Expr l, Expr r)
   {
-    auto & efac = a->getFactory();
+    auto & efac = l->getFactory();
     ExprVector ptrms, ntrms;
     cpp_int comm = 0;
-    simplifyBterm(a->right(), ntrms, ptrms, comm);
+    simplifyBTerm(r, ntrms, ptrms, comm);
     comm = -comm;
-    simplifyBterm(a->left(), ptrms, ntrms, comm);
+    simplifyBTerm(l, ptrms, ntrms, comm);
 
     for (auto it1 = ptrms.begin(); it1 != ptrms.end();)
     {
@@ -173,26 +183,23 @@ namespace ufo
       else ++it1;
     }
 
-    Expr ty = NULL;
-    if (!ptrms.empty()) ty = typeOf(*ptrms.begin());
-    else if (!ntrms.empty()) ty = typeOf(*ntrms.begin());
-    else if (comm == 0)
+    Expr ty = typeOf(l);
+    if (ptrms.empty() && ntrms.empty())
     {
-      if (isOpX<EQ>(a) || isOpX<BULE>(a) || isOpX<BUGE>(a) ||
-                          isOpX<BSLE>(a) || isOpX<BSGE>(a))
-        return mk<TRUE>(efac);
-      else mk<FALSE>(efac);
-    }
-    else
-    {
-      if (isOpX<EQ>(a)) return mk<FALSE>(efac);
+      Expr tmp = mk<OP>(l, l);
+      if (comm == 0)
+      {
+        if (isOpX<EQ>(tmp) || isOpX<BULE>(tmp) || isOpX<BUGE>(tmp) ||
+                              isOpX<BSLE>(tmp) || isOpX<BSGE>(tmp))
+          return mk<TRUE>(efac);
+        else return mk<FALSE>(efac);
+      }
+      if (isOpX<EQ>(tmp)) return mk<FALSE>(efac);
     }
 
     if (comm > 0) ptrms.push_back(bvnum(mkMPZ(comm, efac), ty));
     if (comm < 0) ntrms.push_back(bvnum(mkMPZ(-comm, efac), ty));
-    return
-      replaceAll(replaceAll(a, a->left(), mkbadd(ptrms, ty, efac)),
-                               a->right(), mkbadd(ntrms, ty, efac));
+    return mk<OP>(mkbadd(ptrms, ty, efac), mkbadd(ntrms, ty, efac));
   }
 
   struct SimplifyBVExpr
@@ -230,15 +237,58 @@ namespace ufo
           }
         }
       }
+      if (isOpX<NEG>(exp))
+      {
+        return mkNeg(exp->left());
+      }
+      if (isOpX<EQ>(exp) || isOpX<NEQ>(exp) ||
+          isOpX<BULT>(exp) || isOpX<BSLT>(exp) ||
+          isOpX<BULE>(exp) || isOpX<BSLE>(exp) ||
+          isOpX<BUGT>(exp) || isOpX<BSGT>(exp) ||
+          isOpX<BUGE>(exp) || isOpX<BSGE>(exp))
+      {
+        if ((isOpX<BSEXT>(exp->left()) && isOpX<BSEXT>(exp->right())) ||
+            (isOpX<BZEXT>(exp->left()) && isOpX<BZEXT>(exp->right())))
+          if (width(typeOf(exp->left()->left())) ==
+              width(typeOf(exp->right()->left())))
+              return reBuildCmp(exp, exp->left()->left(), exp->right()->left());
+      }
       if (isOpX<BEXTRACT>(exp))
       {
         if (isOpX<BEXTRACT>(exp->last()))
-        {
           // to extend
           if (exp->left()  == exp->last()->left() &&
               exp->right() == exp->last()->right())
-            return exp->last();
-        }
+              return exp->last();
+
+        if (width(typeOf(exp->last())) == high(exp) - low(exp) + 1)
+          return exp->last();
+      }
+      if (isOpX<BADD>(exp) && exp->arity() == 2)
+      {
+        if (is_bvnum(exp->left()) && lexical_cast<cpp_int>(exp->left()->left()) == 0)
+          return exp->right();
+        if (is_bvnum(exp->right()) && lexical_cast<cpp_int>(exp->right()->left()) == 0)
+          return exp->left();
+        ExprVector terms;
+        // to extend...
+        for (auto it = exp->args_begin (), end = exp->args_end (); it != end; ++it)
+          terms.push_back(*it);
+        return mkbadd(terms, typeOf(exp), exp->getFactory());
+      }
+      if (isOpX<BMUL>(exp) && exp->arity() == 2)
+      {
+        if (is_bvnum(exp->left()) && lexical_cast<cpp_int>(exp->left()->left()) == 1)
+          return exp->right();
+        if (is_bvnum(exp->right()) && lexical_cast<cpp_int>(exp->right()->left()) == 1)
+          return exp->left();
+      }
+      if (isOpX<BMUL>(exp) && exp->arity() == 2)
+      {
+        if (is_bvnum(exp->left()) && lexical_cast<cpp_int>(exp->left()->left()) == 0)
+          return exp->left();
+        if (is_bvnum(exp->right()) && lexical_cast<cpp_int>(exp->right()->left()) == 0)
+          return exp->right();
       }
       return exp;
     }
@@ -250,6 +300,88 @@ namespace ufo
     return dagVisit (rw, exp);
   }
 
+  template <typename OP> static Expr rep(Expr exp)
+  {
+    // `isOpX<OP>(exp)` should hold at most once,
+    // so types and widths are computed at most once too
+    if (isOpX<OP>(exp) && exp->arity() == 2)
+    {
+      Expr t1 = typeOf(exp->left());
+      Expr t2 = typeOf(exp->right());
+      if (isOpX<BVSORT>(t1) && isOpX<BVSORT>(t2))
+      {
+        int w1 = width(t1);
+        int w2 = width(t2);
+        if (w1 > w2)
+          exp = mk<OP>(exp->left(), sext(exp->right(), w1));
+        else if (w2 > w1)
+          exp = mk<OP>(sext(exp->left(), w2), exp->right());
+      }
+    }
+    return exp;
+  }
+
+  struct TypeRep
+  {
+    TypeRep () {}
+    Expr operator() (Expr exp)
+    {
+      exp = rep<EQ>(exp);
+      exp = rep<NEQ>(exp);
+      exp = rep<BULT>(exp);
+      exp = rep<BSLT>(exp);
+      exp = rep<BULE>(exp);
+      exp = rep<BSLE>(exp);
+      exp = rep<BUGT>(exp);
+      exp = rep<BSGT>(exp);
+      exp = rep<BUGE>(exp);
+      exp = rep<BSGE>(exp);
+      exp = rep<BAND>(exp);
+      exp = rep<BOR>(exp);
+      exp = rep<BADD>(exp);
+      exp = rep<BSUB>(exp);
+      exp = rep<BMUL>(exp);
+      exp = rep<BUDIV>(exp);
+      exp = rep<BSDIV>(exp);
+      exp = rep<BUREM>(exp);
+      exp = rep<BSREM>(exp);
+
+      if (isOpX<SELECT>(exp) && typeOf(exp->left())->left() != typeOf(exp->right()))
+      {
+        int w1 = width(typeOf(exp->left())->left());
+        int w2 = width(typeOf(exp->right()));
+        if (w1 > w2)
+          exp = mk<SELECT>(exp->left(), sext(exp->right(), w1));
+        else
+          assert(0);
+      }
+      if (isOpX<STORE>(exp) && typeOf(exp->left())->left() != typeOf(exp->right()))
+      {
+        int w1 = width(typeOf(exp->left())->left());
+        int w2 = width(typeOf(exp->right()));
+        if (w1 > w2)
+          exp = mk<STORE>(exp->left(), sext(exp->right(), w1), exp->last());
+        else
+          assert(0);
+      }
+      if (isOpX<STORE>(exp) && typeOf(exp->left())->right() != typeOf(exp->last()))
+      {
+        int w1 = width(typeOf(exp->left())->left());
+        int w2 = width(typeOf(exp->last()));
+        if (w1 > w2)
+          exp = mk<STORE>(exp->left(), exp->right(), sext(exp->last(), w1));
+        else
+          assert(0);
+      }
+      return exp;
+    }
+  };
+
+  inline static Expr typeRepair (Expr exp)
+  {
+    RW<TypeRep> rw(new TypeRep());
+    return dagVisit (rw, exp);
+  }
 }
 
 #endif

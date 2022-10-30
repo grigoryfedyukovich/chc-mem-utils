@@ -2987,7 +2987,6 @@ namespace expr
     return sz.count;
   }
 
-
   // -- replace all occurrences of s by t
   inline Expr replaceAll (Expr exp, Expr s, Expr t)
   {
@@ -3007,13 +3006,13 @@ namespace expr
   }
 
   // pairwise replacing
-  inline Expr replaceAll (Expr exp, ExprMap& m)
+  inline Expr replaceAll (Expr exp, ExprMap& m, int bnd = 10)
   {
     if (m.empty()) return exp;
     RAVALLM rav(&m);
     Expr tmp = dagVisit (rav, exp);
-    if (tmp == exp) return tmp;
-    else return replaceAll(tmp, m);
+    if (bnd == 0 || tmp == exp) return tmp;
+    else return replaceAll(tmp, m, bnd - 1);
   }
 
   // pairwise replacing
@@ -3261,6 +3260,9 @@ namespace expr
             return bvsort (boost::lexical_cast<unsigned>(v->left()) -
                            boost::lexical_cast<unsigned>(v->right()) + 1, efac);
           }
+          if (isOpX<BSLT>(v) || isOpX<BSLE>(v) || isOpX<BSGT>(v) || isOpX<BSGE>(v) ||
+              isOpX<BULT>(v) || isOpX<BULE>(v) || isOpX<BUGT>(v) || isOpX<BUGE>(v))
+              return mk<BOOL_TY> (efac);
           if (isOpX<BREPEAT>(v) || isOpX<INT2BV>(v) || isOpX<BV2INT>(v))
           {
             assert(0 && "not implemented");
@@ -3268,7 +3270,7 @@ namespace expr
           return typeOf(v->left());
         }
 
-      std::cerr << "WARNING: could not infer type of: " << *v << "\n";
+      // std::cout << "WARNING: could not infer type of: " << *v << "\n";
       //      assert (0 && "Unreachable");
 
         return Expr();

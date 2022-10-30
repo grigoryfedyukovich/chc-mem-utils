@@ -766,14 +766,14 @@ namespace ufo
   }
 
   template<typename Range> static Expr eliminateQuantifiers(Expr fla, Range& qVars,
-                                       bool doArithm = true, bool doCore = true, bool weaken = false)
+                                       bool doArithm = false, bool doCore = true, bool weaken = false)
   {
     if (qVars.size() == 0) return fla;
     ExprSet dsjs, newDsjs;
     getDisj(fla, dsjs);
     if (dsjs.size() > 1)
     {
-      for (auto & d : dsjs) newDsjs.insert(eliminateQuantifiers(d, qVars, true, true, weaken));
+      for (auto & d : dsjs) newDsjs.insert(eliminateQuantifiers(d, qVars, doArithm, true, weaken));
       return disjoin(newDsjs, fla->getFactory());
     }
 
@@ -814,10 +814,10 @@ namespace ufo
     }
 
     Expr condTmp = replaceAll(fla, from, to);
-    Expr tmp = eliminateQuantifiers(condTmp, varsCond, true, true, weaken);
+    Expr tmp = eliminateQuantifiers(condTmp, varsCond, false, true, weaken);
     tmp = replaceAll(tmp, to, from);
 
-    return eliminateQuantifiers(tmp, vars, true, true, weaken);
+    return eliminateQuantifiers(tmp, vars, false, true, weaken);
   }
 
   inline static Expr keepQuantifiers(Expr fla, ExprVector& vars, bool weaken = false)
@@ -825,7 +825,7 @@ namespace ufo
     ExprSet varsSet;
     filter (fla, bind::IsConst (), inserter(varsSet, varsSet.begin()));
     minusSets(varsSet, vars);
-    return eliminateQuantifiers(fla, varsSet, true, true, weaken);
+    return eliminateQuantifiers(fla, varsSet, false, true, weaken);
   }
 
   inline static Expr keepQuantifiersReplWeak(Expr fla, ExprVector& vars)

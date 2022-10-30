@@ -3,6 +3,7 @@
 
 #include <fstream>
 #include "ae/AeValSolver.hpp"
+#include "ae/ExprSimplBv.hpp"
 #include "SetEncoding.hpp"
 
 using namespace std;
@@ -1054,7 +1055,9 @@ namespace ufo
           ExprVector all;
           for (auto it = toComb.rbegin(); it != toComb.rend(); ++it)
           {
-            all.push_back(chcs[*it].body);
+            auto & h = chcs[*it];
+            all.push_back(h.body);
+            s.locVars.insert(s.locVars.end(), h.locVars.begin(), h.locVars.end());
             if (*it != i) toEraseChcs.insert(*it);
           }
           s.body = distribDisjoin(all, m_efac);
@@ -1590,6 +1593,11 @@ namespace ufo
         enc_chc << ")\n\n";
       }
       enc_chc << "(check-sat)\n";
+    }
+
+    int getStat()
+    {
+      return u.getStat();
     }
   };
 }

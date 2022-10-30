@@ -18,6 +18,7 @@ namespace ufo
     ZSolver<EZ3> smt;
     bool can_get_model;
     ZSolver<EZ3>::Model* m;
+    int stat = 0;
 
   public:
 
@@ -100,8 +101,10 @@ namespace ufo
       }
     }
 
+
     template <typename T> boost::tribool isSat(T& cnjs, bool reset=true)
     {
+      stat++;
       allVars.clear();
       if (m != NULL) { free(m); m = NULL; }
       if (reset) smt.reset();
@@ -191,9 +194,14 @@ namespace ufo
      */
     boost::tribool implies (Expr a, Expr b)
     {
-      if (a == b) return true;
       if (isOpX<TRUE>(b)) return true;
-      if (isOpX<FALSE>(a)) return true;
+
+      ExprSet cnjs;
+      getConj(a, cnjs);
+      for (auto & c : cnjs)
+        if (c == b || isOpX<FALSE>(c))
+        return true;
+
       return ! isSat(a, mkNeg(b));
     }
 
@@ -457,7 +465,7 @@ namespace ufo
       if (!isOpX<MPZ>(v)) return indeterminate;
       return isTrue(mk<EQ>(e, bvnum(v, typeOf(e))));
     }
-    
+
     /**
      * Model-based simplification of a formula with 1 (one only) variable
      */
@@ -706,6 +714,16 @@ namespace ufo
       outs() << "(assert ";
       print (form);
       outs() << ")\n";
+    }
+
+    bool canGetModel()
+    {
+      return can_get_model;
+    }
+
+    int getStat()
+    {
+      return stat;
     }
   };
 
