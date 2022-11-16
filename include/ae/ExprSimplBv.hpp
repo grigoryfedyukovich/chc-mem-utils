@@ -202,6 +202,31 @@ namespace ufo
     return mk<OP>(mkbadd(ptrms, ty, efac), mkbadd(ntrms, ty, efac));
   }
 
+  inline static Expr repairBPrio (Expr e, Expr lhs)
+  {
+    auto & efac = e->getFactory();
+    ExprVector ptrms, ntrms;
+    cpp_int comm = 0;
+    simplifyBTerm(e->right(), ntrms, ptrms, comm);
+    comm = -comm;
+    simplifyBTerm(e->left(), ptrms, ntrms, comm);
+
+    Expr ty = typeOf(e->left());
+    for (auto pit = ptrms.begin(); pit != ptrms.end(); )
+    {
+      if (contains(*pit, lhs)) pit++;
+      else
+      {
+        ntrms.push_back(mk<BMUL>(bvnum(mkMPZ(-1, efac), ty), *pit));
+        pit = ptrms.erase(pit);
+      }
+    }
+    if (ptrms.size() != 1) return NULL;
+
+    if (comm != 0) ntrms.push_back(bvnum(mkMPZ(-comm, efac), ty));
+    return reBuildCmp(e, mkbadd(ptrms, ty, efac), mkbadd(ntrms, ty, efac));
+  }
+
   struct SimplifyBVExpr
   {
     SimplifyBVExpr () {};

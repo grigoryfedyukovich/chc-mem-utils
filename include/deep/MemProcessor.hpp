@@ -437,12 +437,19 @@ namespace ufo
                   << r.srcRelation << " -> " << r.dstRelation <<
                   (r.isQuery ? " [Q]": (r.isInductive ? " [TR]": "")) << "\n";
         Expr body = r.body;
-        Expr allocUpd = getUpdLiteral(body, allocTy, "_alloc'");
         if (!r.isQuery)
         {
           ExprVector toElim = {r.dstVars[allocMap[r.dstRelation]]};
-          body = ufo::eliminateQuantifiers(body, toElim);
-          if (allocUpd != NULL) body = mk<AND>(allocUpd, body);
+          ExprSet dsjsSet, ndsjsSet;
+          getDisj(disjunctify(body), dsjsSet);
+          for (auto d : dsjsSet)
+          {
+            Expr allocUpd = getUpdLiteral(d, allocTy, "_alloc'");
+            d = simpleQE(d, toElim, false);
+            assert (allocUpd != NULL && "ALLOC UPDATE NOT FOUND");
+            ndsjsSet.insert(mk<AND>(allocUpd, d));
+          }
+          body = distribDisjoin(ndsjsSet, m_efac);
         }
         if (r.isFact)
         {
@@ -859,33 +866,49 @@ namespace ufo
         if (hasOnlyVars(bb, varsp))
         {
           if (vars != varsp) bb = replaceAll(bb, varsp, vars);
-          addToCandidates(ind, bb, debugMarker);
-
-          if (isOpX<EQ>(bb))
           {
-            if (isOpX<SELECT>(bb->left()) && contains(allArrVars, bb->left()->left()))
+            ExprSet factored;
+            getConj(factor(bb, prj), factored);
             {
-              if (true == u.equalsTo(bb->right(), mkMPZ(0, m_efac)))
+              for (auto & f : factored)
               {
-                Expr up = bb->left()->right();
-                if (printLog)
-                  outs () << "  storing zero at " << up << "\n";
-                upbounds[decls[ind]].insert(up);
-              }
-            }
-            else if (isOpX<SELECT>(bb->right()) && contains(allArrVars, bb->right()->left()))
-            {
-              if (true == u.equalsTo(bb->left(), mkMPZ(0, m_efac)))
-              {
-                Expr up = bb->right()->right();
-                if (printLog)
-                  outs () << "  storing zero at " << up << "\n";
-                upbounds[decls[ind]].insert(up);
+                addToCandidates(ind, f, debugMarker, false);
+                if (isOpX<EQ>(f))
+                {
+                  if (isOpX<SELECT>(f->left()) && contains(allArrVars, f->left()->left()))
+                  {
+                    if (true == u.equalsTo(f->right(), mkMPZ(0, m_efac)))
+                    {
+                      Expr up = f->left()->right();
+                      if (printLog)
+                        outs () << "  storing zero at " << up << "\n";
+                      upbounds[decls[ind]].insert(up);
+                    }
+                  }
+                  else if (isOpX<SELECT>(f->right()) && contains(allArrVars, f->right()->left()))
+                  {
+                    if (true == u.equalsTo(f->left(), mkMPZ(0, m_efac)))
+                    {
+                      Expr up = f->right()->right();
+                      if (printLog)
+                        outs () << "  storing zero at " << up << "\n";
+                      upbounds[decls[ind]].insert(up);
+                    }
+                  }
+                }
               }
             }
           }
         }
       }
+    }
+
+    bool varNoise(Expr var)
+    {
+      if (lexical_cast<string>(var).find("$tmp") != string::npos) return true;
+      if (lexical_cast<string>(var).find("__CPROVER") != string::npos) return true;
+      if (lexical_cast<string>(var).find("VERIFIER") != string::npos) return true;
+      return false;
     }
 
     void processFact(HornRuleExt& c)
@@ -900,13 +923,17 @@ namespace ufo
       {
         for (auto it1 = v.begin(); it1 != v.end(); it1++)
         {
+          if (varNoise(*it1)) continue;
           for (auto it2 = it1; it2 != (prj > 1 ? v.end() : std::next(it1)); it2++)
           {
+            if (varNoise(*it2)) continue;
             for (auto it3 = it2; it3 != (prj > 2 ? v.end() : std::next(it2)); it3++)
             {
-              if (typeOf(*it1) == typeOf(*it2) && typeOf(*it2) == typeOf(*it3))
+              if (varNoise(*it3)) continue;
+              for (auto it4 = it3; it4 != (prj > 3 ? v.end() : std::next(it3)); it4++)
               {
-                ExprSet vars = {*it1, *it2, *it3};
+                if (varNoise(*it4)) continue;
+                ExprSet vars = {*it1, *it2, *it3, *it4};
                 bodyProjs.insert(projectOnlyVars(a, vars));
               }
             }
@@ -945,8 +972,9 @@ namespace ufo
                        ruleManager.invVars[c.srcRelation], indSrc, 1);
     }
 
-    void processInd(HornRuleExt& c)
+    void processTrans(HornRuleExt& c)
     {
+      int indSrc = getVarIndex(c.srcRelation, decls);
       int indDst = getVarIndex(c.dstRelation, decls);
 
       ExprSet bodyCnjs;
@@ -956,6 +984,9 @@ namespace ufo
       {
         preproAdder(a, ruleManager.invVars[c.dstRelation],
                        ruleManager.invVarsPrime[c.dstRelation], indDst, 2);
+
+        preproAdder(a, ruleManager.invVars[c.srcRelation],
+                       ruleManager.invVars[c.srcRelation], indSrc, 299);
       }
     }
 
@@ -965,40 +996,100 @@ namespace ufo
         ruleManager.invVarsPrime[rel], ruleManager.invVars[rel]);
     }
 
+    Expr splitVar(Expr e, ExprVector& vars)
+    {
+      if (!isOpX<EQ>(e)) return NULL;
+
+      ExprVector v;
+      filter (e->left(), IsConst (), inserter(v, v.begin()));
+
+      if (v.size() == 1 && contains(vars, *v.begin()))
+      {
+        auto tmp = repairBPrio(e, *v.begin());
+        if (tmp != NULL) return tmp;
+      }
+
+      v.clear();
+      filter (e->right(), IsConst (), inserter(v, v.begin()));
+
+      if (v.size() == 1 && contains(vars, *v.begin()))
+      {
+        auto tmp = repairBPrio(mk<EQ>(e->right(), e->left()), *v.begin());
+        if (tmp != NULL) return tmp;
+      }
+
+      return NULL;
+    }
+
     void processProp(HornRuleExt& c)
     {
-      ExprSet bodyCnjs;
+      ExprSet bodyCnjs, bodyCnjsExt;
       getConj(c.body, bodyCnjs);
       ExprMap bodySEqs, bodyDEqs; // for forward and backward prop, resp.
-      for (auto a : bodyCnjs)
-        if (isOpX<EQ>(a) && contains(c.dstVars, a->left()))
-          bodyDEqs[a->left()] = a->right();
-        else if (isOpX<EQ>(a) && contains(c.dstVars, a->right()))
-          bodyDEqs[a->right()] = a->left();
-        else if (isOpX<EQ>(a) && contains(c.srcVars, a->left()))
-          bodySEqs[a->left()] = a->right();
-        else if (isOpX<EQ>(a) && contains(c.srcVars, a->right()))
-          bodySEqs[a->right()] = a->left();
+      ExprSet extraEqs;
+      while(true)
+      {
+        bodyCnjsExt.clear();
+        for (auto a : bodyCnjs)
+        {
+          if (!isOpX<EQ>(a)) continue;
+          if (isArray(a->left()))
+          {
+            auto b = u.removeITE(rewriteSelectStore(a));
+            if (a != b)
+              getConj(b, bodyCnjsExt);
+          }
 
-      ExprMap bodySEqsNew, bodyDEqsNew;
+          Expr sp = splitVar(a, c.dstVars);
+          if (sp != NULL)
+          {
+            if (bodyDEqs[sp->left()] != NULL)
+              extraEqs.insert(unprime(mk<EQ>(bodyDEqs[sp->left()], sp->right()), c.dstRelation));
+            bodyDEqs[sp->left()] = sp->right();
+          }
+          sp = splitVar(a, c.srcVars);
+          if (sp != NULL)
+          {
+            if (bodySEqs[sp->left()] != NULL)
+              extraEqs.insert(unprime(mk<EQ>(bodySEqs[sp->left()], sp->right()), c.dstRelation));
+            bodySEqs[sp->left()] = sp->right();
+          }
+        }
+        if (bodyCnjsExt.empty()) break;
+        bodyCnjs = bodyCnjsExt;
+      }
+
+      int indSrc = getVarIndex(c.srcRelation, decls);
+      int indDst = getVarIndex(c.dstRelation, decls);
+
+      for (auto & a : extraEqs)
+        preproAdder(a,
+                     ruleManager.invVars[c.dstRelation],
+                     ruleManager.invVars[c.dstRelation], indDst, 128);
+
+      ExprMap bodySEqsNew, bodyDEqsNew, bodySEqsM, bodyDEqsM;
       for (auto & a : bodySEqs)
       {
         Expr tmp = replaceAll(a.second, bodySEqs);
         if (hasOnlyVars(tmp, ruleManager.invVarsPrime[c.dstRelation]))
           bodySEqsNew[a.first] = unprime(tmp, c.dstRelation);
+        tmp = replaceAll(a.second, bodyDEqs);
+        if (hasOnlyVars(tmp, ruleManager.invVars[c.srcRelation]))
+          bodySEqsM[a.first] = tmp;
       }
-      bodySEqs = bodySEqsNew;
 
       for (auto & a : bodyDEqs)
       {
         Expr tmp = replaceAll(a.second, bodyDEqs);
         if (hasOnlyVars(tmp, ruleManager.invVars[c.srcRelation]))
           bodyDEqsNew[unprime(a.first, c.srcRelation)] = tmp;
+        tmp = replaceAll(a.second, bodySEqs);
+        if (hasOnlyVars(tmp, ruleManager.invVarsPrime[c.dstRelation]))
+          bodyDEqsM[a.first] = tmp;
       }
-      bodyDEqs = bodyDEqsNew;
 
-      int indSrc = getVarIndex(c.srcRelation, decls);
-      int indDst = getVarIndex(c.dstRelation, decls);
+      bodySEqs = bodySEqsNew;
+      bodyDEqs = bodyDEqsNew;
 
       for (auto & a : bodySEqs)
         if (true == u.isSat(mk<EQ>(a.first, a.second)))
@@ -1011,6 +1102,18 @@ namespace ufo
           preproAdder(mk<EQ>(a.first, a.second),
                        ruleManager.invVars[c.dstRelation],
                        ruleManager.invVars[c.dstRelation], indDst, 28);
+
+      for (auto & a : bodySEqsM)
+        if (true == u.isSat(mk<EQ>(a.first, a.second)))
+           preproAdder(mk<EQ>(a.first, a.second),
+                      ruleManager.invVars[c.dstRelation],
+                      ruleManager.invVars[c.dstRelation], indDst, 281);
+
+      for (auto & a : bodyDEqsM)
+        if (true == u.isSat(mk<EQ>(a.first, a.second)))
+           preproAdder(unprime(mk<EQ>(a.first, a.second), c.dstRelation),
+                      ruleManager.invVars[c.dstRelation],
+                      ruleManager.invVars[c.dstRelation], indDst, 281);
 
       for (auto a : sfs[indSrc].back().learnedExprs)
         addToCandidates(indDst, replaceAll(a, bodySEqs, 1), 3);
@@ -1097,7 +1200,6 @@ namespace ufo
             }
           }
         }
-
       }
     }
 
@@ -1659,8 +1761,8 @@ namespace ufo
                     << c.srcRelation << " -> " << c.dstRelation << "\n";
 
           if (c.isFact) processFact(c);
-          if (c.isQuery) processQuery(c);
-          if (c.isInductive) processInd(c);
+          else if (c.isQuery) processQuery(c);
+          else processTrans(c);
           if (!c.isInductive && !c.isQuery) processInitCounters(c);
           if (!c.isInductive && !c.isQuery && dat) processData(chc);
         }

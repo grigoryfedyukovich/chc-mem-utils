@@ -294,6 +294,18 @@ namespace ufo
           }
         }
 
+        ExprVector av;
+        filter (arg, IsConst (), inserter(av, av.begin()));
+        for (auto & a : av)
+        {
+          Expr var = getVarByName(a, ty);
+          if (find(names.begin(), names.end(), a) != names.end())
+          {
+            Expr h = getVarId(a);
+            arg = replaceAll(arg, a, mk<SELECT>(off, h));
+            //TODO: make sure it's always offset
+          }
+        }
         varToDefs(defs, var);
         Expr name = mkTerm<string>(lexical_cast<string>(var) + "'", efac);
         var = mk<FAPP>(mk<FDECL>(name, ty));

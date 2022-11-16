@@ -1055,7 +1055,7 @@ namespace ufo
           ExprVector all;
           for (auto it = toComb.rbegin(); it != toComb.rend(); ++it)
           {
-            auto & h = chcs[*it];
+            auto h = chcs[*it];
             all.push_back(h.body);
             s.locVars.insert(s.locVars.end(), h.locVars.begin(), h.locVars.end());
             if (*it != i) toEraseChcs.insert(*it);
