@@ -30,6 +30,7 @@ namespace ufo
     int norm, cnts, mutNum, prj;
     map<Expr, ExprSet> sizes, counters, negCounters, upbounds, lobounds;
     map<int, ExprVector> candidatesNext;
+    map<int, set<pair<int, int>>> stableVars;
 
     bool multiHoudini (vector<HornRuleExt*> worklist, bool recur = true,
       bool fastExit = false)
@@ -93,6 +94,22 @@ namespace ufo
       if (!recur) return false;
       if (res1) return anyProgress(worklist);
       else return multiHoudini(worklist);
+    }
+
+    void computeStableVars()
+    {
+      for (int i = 0; i < ruleManager.chcs.size(); i++)
+      {
+        auto & r = ruleManager.chcs[i];
+
+        // currently, only alloc
+        if (!r.isFact && !r.isQuery)
+          if (u.implies(r.body, mk<EQ>(
+            r.srcVars[allocMap[r.srcRelation]],
+            r.dstVars[allocMap[r.dstRelation]])))
+              stableVars[i].insert(
+                {allocMap[r.dstRelation], allocMap[r.srcRelation]});
+      }
     }
 
     // beginning of the preprocessing:
@@ -169,44 +186,146 @@ namespace ufo
       }
     }
 
-    // find a fact CHC, r = body -> rel(..), look for its alloca storage (key -> val)
-    // constucts \phi as `body(fact) /\ alloc[key] = value`
+    // get a CHC r = body -> rel(..), look for its alloca storage (key -> val)
+    // construct \phi as `body(r) /\ alloc[key] = value`
     // while \phi is sat,
     //       1) get m, s.t. m \models \phi, and
     //       2) update \phi to \phi /\ m(val) != val
     //       3) insert m(val) to alloca_vals [rel]
     //       4) insert m(key) to aliases [rel] [m(val)], and
     //       5) insert m(val) to aliases^-1 [rel] [m(key)]
+
+    void extractPtrInfo(HornRuleExt & r, Expr init, Expr ptr)
+    {
+      auto & v = r.dstVars[allocMap[r.dstRelation]];
+      assert (isArray(v) && isOpX<BVSORT>(typeOf(v)->right()));
+
+      if (printLog >= 6) outs () << "extractPtrInfo: "
+          << r.srcRelation << " -> " << r.dstRelation << "\n";
+
+      Expr key, val;
+      if (ptr != NULL) key = ptr;
+      else key = mkConst(mkTerm<string> ("key", m_efac), typeOf(v)->left());
+      val = mkConst(mkTerm<string> ("val", m_efac), typeOf(v)->right());
+      ExprVector cnjs = {init, r.body, mk<EQ>(mk<SELECT>(v, key), val)};
+
+      bool first = true;
+      while (true == u.isSat(cnjs, first))
+      {
+        first = false;
+        auto m = u.getModel(val);
+        cnjs = {mk<NEQ>(val, m)};
+        if (lexical_cast<string>(toMpz(m)) != "0")
+        {
+          if (ptr == NULL)
+            allocVals[r.dstRelation].insert(m);
+          else
+          {
+            aliases[r.dstRelation][ptr].insert(m);
+            aliasesRev[r.dstRelation][m].insert(ptr);
+            if (printLog >= 6) outs () << "    model:  " << toMpz(m) <<
+                      " <- " << toMpz(ptr) << "\n";
+          }
+        }
+      }
+    }
+
     void getInitAllocaVals()
     {
       // get init vals, from fact
       for (auto & r : ruleManager.chcs)
-      {
         if (r.isFact)
-        {
-          auto & v = r.dstVars[allocMap[r.dstRelation]];
-          assert (isArray(v) && isOpX<BVSORT>(typeOf(v)->right()));
+          extractPtrInfo(r, mk<TRUE>(m_efac), NULL);
+    }
 
-          if (printLog >= 6) outs () << "getInitAllocaVals, arr var (1):  " << v << "\n";
-          auto key = mkConst(mkTerm<string> ("key", m_efac), typeOf(v)->left());
-          auto val = mkConst(mkTerm<string> ("val", m_efac), typeOf(v)->right());
-          ExprSet cnjs = {r.body, mk<EQ>(mk<SELECT>(v, key), val)};
-          while (true == u.isSat(cnjs))
+    Expr getAllocCand(Expr decl)
+    {
+      auto & v = ruleManager.invVars[decl][allocMap[decl]];
+      Expr key = mkConst(mkTerm<string> ("key", m_efac), typeOf(v)->left());
+      allocVals[decl].insert(bvnum(mkMPZ(0, m_efac), typeOf(v)->left()));
+
+      ExprSet dsjs;
+      for (auto & val : allocVals[decl])
+        dsjs.insert(mk<EQ>(mk<SELECT>(v, key), val));
+
+      return mknary<FORALL>(ExprVector({key->left(), disjoin(dsjs, m_efac)}));
+    }
+
+    Expr getAliasCand(Expr decl, Expr ptr)
+    {
+      auto & v = ruleManager.invVars[decl][allocMap[decl]];
+      auto key = mkConst(mkTerm<string> ("key", m_efac), typeOf(v)->left());
+      auto eq = mk<EQ>(mk<SELECT>(v, key), ptr);
+      ExprSet dsjs;
+      for (auto & k : aliases[decl][ptr]) dsjs.insert(mk<EQ>(key, k));
+      return mknary<FORALL>(
+            ExprVector({key->left(), mk<IMPL>(eq, disjoin(dsjs, m_efac))}));
+    }
+
+    void propagateAllocVals()
+    {
+      bool found = false;
+      for (int i = 0; i < ruleManager.chcs.size(); i++)
+      {
+        auto & r = ruleManager.chcs[i];
+        if (r.isFact || r.isQuery) continue;
+
+        int sz = allocVals[r.dstRelation].size();
+        if (stableVars[i].empty())
+        {
+          extractPtrInfo(r, getAllocCand(r.srcRelation), NULL);
+          if (allocVals[r.dstRelation].size() > sz)
           {
-            // if (!u.isSat(cnjs)) break;
-            auto m = u.getModel(val);
-            cnjs.insert(mk<NEQ>(val, m));
-            if (lexical_cast<string>(toMpz(m)) != "0")
-            {
-              allocVals[r.dstRelation].insert(m);
-              aliases[r.dstRelation][m].insert(u.getModel(key));
-              aliasesRev[r.dstRelation][u.getModel(key)].insert(m);
-              if (printLog >= 6) outs () << "    model:  " << toMpz(m) <<
-                        " <- " << toMpz(u.getModel(key)) << "\n";
-            }
+            found = true;
+            break;
           }
         }
+        else
+        {
+          // by construction, it is only alloc vars:
+          for (auto & a : allocVals[r.srcRelation])
+            allocVals[r.dstRelation].insert(a);
+        }
+        found |= allocVals[r.dstRelation].size() > sz;
       }
+      if (found) propagateAllocVals();
+    }
+
+    void propagateAliases(Expr ptr)
+    {
+      bool found = false;
+      for (int i = 0; i < ruleManager.chcs.size(); i++)
+      {
+        auto & r = ruleManager.chcs[i];
+        if (r.isFact || r.isQuery) continue;
+
+        int sz = aliases[r.dstRelation][ptr].size();
+        if (stableVars[i].empty())
+        {
+          ExprVector cnjs;
+          Expr v = r.srcVars[allocMap[r.srcRelation]];
+          for (auto & a : aliases[r.srcRelation][ptr])
+            cnjs.push_back(mk<EQ>(mk<SELECT>(v, ptr), a));
+          extractPtrInfo(r, disjoin(cnjs, m_efac), ptr);
+
+          if (aliases[r.dstRelation][ptr].size() > sz)
+          {
+            found = true;
+            break;
+          }
+        }
+        else
+        {
+          // by construction, it is only alloc vars:
+          for (auto & a : aliases[r.srcRelation][ptr])
+          {
+            aliases[r.dstRelation][ptr].insert(a);
+            aliasesRev[r.dstRelation][a].insert(ptr);
+          }
+        }
+        found |= aliases[r.dstRelation][ptr].size() > sz;
+      }
+      if (found) propagateAliases(ptr);
     }
 
     // Houdini-based method to find all alloca values
@@ -215,6 +334,8 @@ namespace ufo
     //      and update cand to \forall key, (alloc[key] = 0 \/ alloc[key] = model)
     void getAllocaVals()
     {
+      propagateAllocVals();
+
       // get init cands, from vals
       for (auto & d : ruleManager.decls)
       {
@@ -222,17 +343,7 @@ namespace ufo
         if (printLog >= 6) outs () << "getAllocaVals, decl " << d->left()
                                   << ", ind = "<< getVarIndex(decl, decls)<< "\n";
         // if (allocVals[decl].empty()) continue;
-        auto & v = ruleManager.invVars[decl][allocMap[decl]];
-        if (printLog >= 6) outs () << "  v = " << v << ", " << typeOf(v) << "\n";
-        allocVals[decl].insert(bvnum(mkMPZ(0, m_efac), typeOf(v)->left()));
-        auto key = mkConst(mkTerm<string> ("key", m_efac), typeOf(v)->left());
-        ExprSet dsjs;
-        for (auto & val : allocVals[decl])
-          dsjs.insert(mk<EQ>(mk<SELECT>(v, key), val));
-
-        candidates[getVarIndex(decl, decls)] = { mknary<FORALL>(
-                            ExprVector({key->left(), disjoin(dsjs, m_efac)})) };
-
+        candidates[getVarIndex(decl, decls)] = { getAllocCand(decl)};
         if (printLog >= 6) outs () << "  cands:\n";
         if (printLog >= 6) pprint(candidates[getVarIndex(decl, decls)], 4);
       }
@@ -268,25 +379,20 @@ namespace ufo
     //     \forall key, alloc[key] = ptr => key = cti(alloca)[ptr] \/ ...
     void getAliases(Expr ptr)
     {
+      propagateAliases(ptr);
       for (auto & d : ruleManager.decls)
       {
         auto decl = d->left();
         if (printLog >= 6) outs () << "\ngetAliases, decl " << d->left()
                             << ", ind = "<< getVarIndex(decl, decls)<< "\n";
 
-        auto & v = ruleManager.invVars[decl][allocMap[decl]];
-        allocVals[decl].insert(bvnum(mkMPZ(0, m_efac), typeOf(v)->left()));
-        auto key = mkConst(mkTerm<string> ("key", m_efac), typeOf(v)->left());
-        auto eq = mk<EQ>(mk<SELECT>(v, key), ptr);
-        ExprSet dsjs;
-        for (auto & k : aliases[decl][ptr])
-          dsjs.insert(mk<EQ>(key, k));
-        candidates[getVarIndex(decl, decls)] = {mknary<FORALL>(
-              ExprVector({key->left(), mk<IMPL>(eq, disjoin(dsjs, m_efac))}))};
+        candidates[getVarIndex(decl, decls)] = {getAliasCand(decl, ptr)};
+
         if (printLog >= 6)
+        {
           outs () << "  decl: " << decl << ", " << ptr << "\ncands:\n";
-        if (printLog >= 6)
           pprint(candidates[getVarIndex(decl, decls)], 4);
+        }
       }
       if (multiHoudini(ruleManager.allCHCs, false, true))
       {
@@ -372,6 +478,10 @@ namespace ufo
         }
         outs () << "Detected memory regions: " << aa.size() <<
                    ", aliases: " << ab.size() << ",\n";
+        outs () << "memory regions:\n";
+        pprint(aa,2);
+        outs () << "aliases:\n";
+        pprint(ab,2);
       }
 
       for (auto & d : ruleManager.decls)
@@ -1959,6 +2069,7 @@ namespace ufo
         outs () << "Simplifying CHCs (in progress):\n";
         ruleManager.print((debug > 3), (debug > 2), "chc_interm");
       }
+      ds.computeStableVars();
       ds.getInitAllocaVals();
       ds.getAllocaVals();
       ds.getAliases();
