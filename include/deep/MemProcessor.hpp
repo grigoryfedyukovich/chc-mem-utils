@@ -2035,7 +2035,6 @@ namespace ufo
       if (serial) ruleManager.serialize("chc_orig");
     }
 
-    ruleManager.wtoSort();
     if (!ruleManager.hasBV) return;
 
     if (debug)
@@ -2077,7 +2076,6 @@ namespace ufo
       ds.addAliasVars();
       ds.rewriteMem();
       auto res = ruleManager.doElim(false);
-      ruleManager.wtoSort();
       if (debug > 0)
       {
         outs() << "\nCHCs after memory-rewriting and simplification:\n";
@@ -2088,7 +2086,6 @@ namespace ufo
     else
     {
       auto res = ruleManager.doElim(false);
-      ruleManager.wtoSort();
     }
 
     if (debug)

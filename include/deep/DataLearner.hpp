@@ -498,20 +498,6 @@ namespace ufo
     map <Expr, vector< vector<double> > > exprToModels;
     map <Expr, ExprVector> invVars;
 
-    bool computeData(map<Expr, ExprVector>& arrRanges, map<Expr, ExprSet>& constr)
-    {
-      exprToModels.clear();
-      invVars.clear();
-      return bnd.unrollAndExecuteMultiple(invVars, exprToModels, arrRanges, constr);
-    }
-
-    void computeDataSplit(Expr srcRel, Expr splitter, Expr invs, bool fwd, ExprSet& constr)
-    {
-      exprToModels.clear();
-      invVars.clear();
-      bnd.unrollAndExecuteSplitter(srcRel, invVars[srcRel], exprToModels[srcRel], splitter, invs, fwd, constr);
-    }
-
     void computeDataOne(int chc, Expr srcRel, Expr invs, bool useVars, ExprSet& addVars)
     {
       exprToModels.clear();

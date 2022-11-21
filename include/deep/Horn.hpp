@@ -67,7 +67,8 @@ namespace ufo
       for (auto c = lin.begin(); c != lin.end(); )
       {
         Expr cnj = *c;
-        if (isOpX<FAPP>(cnj))
+        if (isOpX<FALSE>(cnj)) return false;
+        else if (isOpX<FAPP>(cnj))
         {
           Expr rel = cnj->left();
           {
@@ -123,12 +124,16 @@ namespace ufo
 
     Expr failDecl;
     vector<HornRuleExt> chcs;
-    vector<HornRuleExt*> allCHCs, wtoCHCs, dwtoCHCs;
-    ExprVector wtoDecls;
+    vector<HornRuleExt*> allCHCs, wtoCHCs;
     ExprSet decls;
-    map<Expr, ExprVector> invVars,invVarsPrime;
+    map<Expr, ExprVector> invVars, invVarsPrime;
+    map<Expr, ExprMap> invVarsPrimeMap, invVarsMap;
     map<Expr, vector<int>> outgs;
-    vector<vector<int>> prefixes, cycles;  // for cycles
+    bool cycleSearchDone = false;
+    ExprVector loopheads;
+    map<Expr, vector<vector<int>>> cycles, prefixes;
+    vector<vector<int>> acyclic;
+    ExprVector seqPoints;
     map<Expr, bool> hasArrays;
     bool hasAnyArrays, hasBV = false;
     int debug;
@@ -140,6 +145,22 @@ namespace ufo
 
     CHCs(ExprFactory &efac, EZ3 &z3, bool _mems = false, int d = false) :
       u(efac), m_efac(efac), m_z3(z3), mems(_mems), hasAnyArrays(false), debug(d) {};
+
+    void addVar(Expr decl, Expr var, Expr varPr)
+    {
+      invVars[decl].push_back(var);
+      invVarsPrime[decl].push_back(varPr);
+      invVarsPrimeMap[decl][var] = varPr;
+      invVarsMap[decl][varPr] = var;
+    }
+
+    void resetVars(Expr decl)
+    {
+      invVars[decl].clear();
+      invVarsPrime[decl].clear();
+      invVarsPrimeMap[decl].clear();
+      invVarsMap[decl].clear();
+    }
 
     bool isFapp (Expr e)
     {
@@ -190,8 +211,7 @@ namespace ufo
               continue;
             if (find(origVrs.begin(), origVrs.end(), varPr) != origVrs.end())
               continue;
-            invVars[a->left()].push_back(var);
-            invVarsPrime[a->left()].push_back(varPr);
+            addVar(a->left(), var, varPr);
             break;
           }
         }
@@ -301,9 +321,7 @@ namespace ufo
             }
           }
           else
-          {
              r1 = replaceAll(r, eqs);
-          }
           if (r == r1) break;
           else r = r1;
         }
@@ -324,9 +342,7 @@ namespace ufo
                              r->last()->last());
         }
         else
-        {
           hr.body = r;
-        }
 
         if (lexical_cast<string>(hr.body).find("element-address") != string::npos)
           continue;
@@ -419,8 +435,8 @@ namespace ufo
       for (auto it = chcs.begin(); it != chcs.end();)
       {
         HornRuleExt & hr = *it;
-        hr.splitBody();
-        if (hr.srcRelation == NULL || addedDecl(hr.srcRelation)) ++it;
+        bool nonempty = hr.splitBody();
+        if (nonempty && (hr.srcRelation == NULL || addedDecl(hr.srcRelation))) ++it;
         else
         {
           if (debug > 0)
@@ -448,6 +464,8 @@ namespace ufo
           decls.insert(replaceAll(d, d->left(), newName));
           invVars[hr2.srcRelation] = invVars[hr.srcRelation];
           invVarsPrime[hr2.srcRelation] = invVarsPrime[hr.srcRelation];
+          invVarsPrimeMap[hr2.srcRelation] = invVarsPrimeMap[hr.srcRelation];
+          invVarsMap[hr2.srcRelation] = invVarsMap[hr.srcRelation];
           hr2.dstRelation = hr.dstRelation;
           hr.dstRelation = newName;
           hr2.srcVars = hr.srcVars;
@@ -459,9 +477,9 @@ namespace ufo
 
       // small painless optimization
       int sz = chcs.size();
-      eliminateVacDecls();
+      eliminateVacDecls(true);
       if (debug > 0)
-        outs () << "Vacuity elimination: " << sz << " -> " << chcs.size() << "\n";
+        outs () << "Vacuity elimination (1): " << sz << " -> " << chcs.size() << "\n";
 
       // set encoding is here
       ExprVector names;
@@ -486,7 +504,19 @@ namespace ufo
             rl = typeRepair(rl);
             rl = simplifyBool(rl);
             if (debug >= 3)
+            {
               outs () << "  conv: " << rl << "\n";
+              if (!hr.srcTmp.empty())
+              {
+                outs () << "  new src vars: ";
+                pprint(hr.srcTmp);
+              }
+              if (!hr.dstTmp.empty())
+              {
+                outs () << "  new dst vars: ";
+                pprint(hr.dstTmp);
+              }
+            }
             if (!containsOp<AD_TY>(rl))
             {
               getConj(rl, rlin);
@@ -504,9 +534,7 @@ namespace ufo
           hr.body = conjoin(rlin, m_efac);
         }
         else
-        {
           hr.body = conjoin(hr.lin, m_efac);
-        }
 
         // memsafety checks insertion
         if (mems)
@@ -524,6 +552,11 @@ namespace ufo
         }
       }
       for (auto & c : tmp) chcs.push_back(c);
+
+      sz = chcs.size();
+      eliminateVacDecls(false);
+      if (debug > 0)
+        outs () << "Vacuity elimination (2): " << sz << " -> " << chcs.size() << "\n";
 
       ExprSet allVars = {alloc, mem, off, siz, aux};
       ExprVector allVarsV, allVarsVp;
@@ -555,6 +588,7 @@ namespace ufo
         decls = updDecls;
       }
 
+      map<Expr, bool> added;
       for (auto & hr : chcs)
       {
         ExprSet lin;
@@ -562,26 +596,25 @@ namespace ufo
 
         if (setEnc)   // set-encoding
         {
-
           if (!hr.isFact)
-          {
             hr.srcVars = allVarsV;
-          }
           else
-          {
             hr.locVars.insert(hr.locVars.end(), allVarsV.begin(), allVarsV.end());
-          }
 
           if (!hr.isQuery)
           {
             hr.dstVars = allVarsVp;
-            invVars[hr.dstRelation] = allVarsV;
-            invVarsPrime[hr.dstRelation] = allVarsVp;
+            if (!added[hr.dstRelation])
+            {
+              added[hr.dstRelation] = true;
+              resetVars(hr.dstRelation);
+              for (int i = 0; i < allVarsV.size(); i++)
+                addVar(hr.dstRelation, allVarsV[i], allVarsVp[i]);
+            }
           }
           else
-          {
             hr.locVars.insert(hr.locVars.end(), allVarsVp.begin(), allVarsVp.end());
-          }
+
           if (hr.isFact)
           {
             Expr cArr = mk<CONST_ARRAY>(s, op::bv::bvnum(mkMPZ(0, m_efac), s));
@@ -603,9 +636,11 @@ namespace ufo
         }
         hr.body = simpleQE(hr.body, hr.locVars);
       }
+
+      findCycles();
+
       for (int i = 0; i < chcs.size(); i++)
       {
-        outgs[chcs[i].srcRelation].push_back(i);
         allCHCs.push_back(&chcs[i]);
       }
 
@@ -702,12 +737,9 @@ namespace ufo
       }
 
       allCHCs.clear();
-      for (int i = 0; i < chcs.size(); i++)
-      {
-        outgs[chcs[i].srcRelation].push_back(i);
-        allCHCs.push_back(&chcs[i]);
-      }
+      for (int i = 0; i < chcs.size(); i++) allCHCs.push_back(&chcs[i]);
 
+      findCycles();
       return true;
     }
 
@@ -783,9 +815,8 @@ namespace ufo
       return eliminateTrivTrueOrFalse();     // recursive call
     }
 
-
     // lighter version (compare to the coming `eliminateDecls`)
-    void eliminateVacDecls()
+    void eliminateVacDecls(bool fwd)
     {
       bool toRepeat = false;
       for (auto it = decls.begin(); it != decls.end(); )
@@ -795,12 +826,14 @@ namespace ufo
         bool toDel = true;
         for (int i = 0; i < chcs.size(); i++)
         {
-          if (chcs[i].dstRelation == d->left())
+          if ((fwd && chcs[i].dstRelation == d->left()) ||
+             (!fwd && chcs[i].srcRelation == d->left()))
           {
             toDel = false;
             break;
           }
-          if (chcs[i].srcRelation == d->left())
+          if ((fwd && chcs[i].srcRelation == d->left()) ||
+             (!fwd && chcs[i].dstRelation == d->left()))
             outgs.push_back(i);
         }
         if (toDel)
@@ -822,7 +855,7 @@ namespace ufo
         }
         else ++it;
       }
-      if (toRepeat) eliminateVacDecls();
+      if (toRepeat) eliminateVacDecls(fwd);
     }
 
     bool eliminateDecls()
@@ -912,10 +945,6 @@ namespace ufo
         return eliminateDecls();
       else
       {
-        // remove unrelated constraints and shrink arities of predicates
-        // currently disabled
-        // if (!hasAnyArrays) slice();
-
         int preComb = (chcs.size() - toEraseChcs.size());
         combineCHCs();
         if (preComb > (chcs.size() - toEraseChcs.size()))
@@ -1068,330 +1097,231 @@ namespace ufo
       }
     }
 
-    // (recursive) multi-stage slicing begins here
-    set<int> chcsToVisit;
-    map<Expr, ExprSet> varsSlice;
-
-    void updateTodo(Expr decl, int num)
+    void getAllTraces (Expr src, Expr dst, int len, vector<int> trace,
+                vector<vector<int>>& traces, bool once = false)
     {
-      for (int i = 0; i < chcs.size(); i++)
+      if (len == 1)
       {
-        if (find(toEraseChcs.begin(), toEraseChcs.end(), i) != toEraseChcs.end())
-          continue;
-
-        if (i != num &&
-            !chcs[i].isQuery &&
-            (chcs[i].srcRelation == decl || chcs[i].dstRelation == decl))
-              chcsToVisit.insert(i);
-      }
-    }
-
-    void slice()
-    {
-      chcsToVisit.clear();
-      varsSlice.clear();
-      // first, compute sets of dependent variables
-      for (int i = 0; i < chcs.size(); i++)
-      {
-        if (find(toEraseChcs.begin(), toEraseChcs.end(), i) != toEraseChcs.end())
-          continue;
-
-        if (chcs[i].isQuery)
+        for (auto a : outgs[src])
         {
-          chcs[i].body = keepQuantifiers(chcs[i].body, chcs[i].srcVars);
-          Expr decl = chcs[i].srcRelation;
-          filter (chcs[i].body, bind::IsConst(),
-            std::inserter (varsSlice[decl], varsSlice[decl].begin ()));
-          updateTodo(chcs[i].srcRelation, i);
+          if (chcs[a].dstRelation == dst)
+          {
+            if (once && find(trace.begin(), trace.end(), a) != trace.end())
+              continue;
+            vector<int> newtrace = trace;
+            newtrace.push_back(a);
+            traces.push_back(newtrace);
+          }
         }
-      }
-      while (!chcsToVisit.empty()) slice(*chcsToVisit.begin());
-
-      // now, prepare for variable elimination
-      for (auto & d : varsSlice)
-      {
-//      if (invVars[d.first].size() > d.second.size())
-//        outs () << "sliced for " << *d.first << ": " << invVars[d.first].size()
-//                << " -> "    << d.second.size() << "\n";
-        ExprSet varsPrime;
-        for (auto & v : d.second)
-        {
-          Expr pr = replaceAll(v, invVars[d.first], invVarsPrime[d.first]);
-          varsPrime.insert(pr);
-        }
-
-        keepOnly(invVars[d.first], d.second);
-        keepOnly(invVarsPrime[d.first], varsPrime);
-      }
-
-      // finally, update bodies and variable vectors
-      for (int i = 0; i < chcs.size(); i++)
-      {
-        if (find(toEraseChcs.begin(), toEraseChcs.end(), i) != toEraseChcs.end())
-          continue;
-        auto & c = chcs[i];
-
-        if (u.isFalse(c.body) || u.isTrue(c.body)) continue;
-
-        ExprSet bd;
-        getConj(c.body, bd);
-        for (auto b = bd.begin(); b != bd.end();)
-        {
-          if (emptyIntersect(*b, invVars[c.srcRelation]) &&
-              emptyIntersect(*b, invVarsPrime[c.dstRelation]))
-            b = bd.erase(b);
-          else ++b;
-        }
-        if (!c.isFact) c.srcVars = invVars[c.srcRelation];
-        if (!c.isQuery) c.dstVars = invVarsPrime[c.dstRelation];
-        c.body = conjoin(bd, m_efac);
-      }
-    }
-
-    void slice(int num)
-    {
-      HornRuleExt* hr = &chcs[num];
-      assert (!hr->isQuery);
-      ExprSet srcCore, dstCore, srcDep, dstDep, varDeps, cnjs;
-      auto & dst = hr->dstVars;
-      auto & src = hr->srcVars;
-
-      if (qeUnsupported(hr->body))
-      {
-        varDeps.insert(src.begin(), src.end());
-        varDeps.insert(hr->locVars.begin(), hr->locVars.end());
-        varDeps.insert(dst.begin(), dst.end());
       }
       else
       {
-        // all src vars from the preconditions are dependent
-        varDeps = varsSlice[hr->srcRelation];
-        filter (getPrecondition(hr), bind::IsConst(),
-                      std::inserter (varDeps, varDeps.begin ()));
-
-        for (auto & v : varsSlice[hr->dstRelation])
-          varDeps.insert(replaceAll(v, invVars[hr->dstRelation], dst));
-
-        srcCore = varsSlice[hr->dstRelation];
-        dstCore = varDeps;
-
-        getConj(hr->body, cnjs);
-        while(true)
+        for (auto a : outgs[src])
         {
-          int vars_sz = varDeps.size();
-          for (auto & c : cnjs)
-          {
-            ExprSet varsCnj;
-            filter (c, bind::IsConst(),
-                          std::inserter (varsCnj, varsCnj.begin ()));
-            if (!emptyIntersect(varDeps, varsCnj))
-              varDeps.insert(varsCnj.begin(), varsCnj.end());
-          }
-          if (hr->isInductive)
-          {
-            for (auto & v : varDeps)
-            {
-              varDeps.insert(replaceAll(v, dst, src));
-              varDeps.insert(replaceAll(v, src, dst));
-            }
-          }
-          if (vars_sz == varDeps.size()) break;
+          if (once && find(trace.begin(), trace.end(), a) != trace.end())
+            continue;
+          vector<int> newtrace = trace;
+          newtrace.push_back(a);
+          getAllTraces(chcs[a].dstRelation, dst, len-1, newtrace, traces, once);
         }
       }
+    }
 
-      bool updateSrc = false;
-      bool updateDst = false;
-      if (!hr->isFact)
+    bool isRelVisited(vector<int>& trace, ExprVector& av, Expr rel)
+    {
+      for (auto t : trace)
+        if (chcs[t].dstRelation == rel)
+          return true;
+      return find(av.begin(), av.end(), rel) != av.end();
+    }
+
+    void getAllAcyclicTraces (Expr src, Expr dst, int len, vector<int> trace,
+                  vector<vector<int>>& traces, ExprVector& av)
+    {
+      if (len == 1)
       {
-        ExprSet& srcVars = varsSlice[hr->srcRelation];
-        for (auto v = varDeps.begin(); v != varDeps.end();)
+        for (auto a : outgs[src])
         {
-          if (find(src.begin(), src.end(), *v) != src.end())
+          if (chcs[a].dstRelation == dst)
           {
-            if (find(srcVars.begin(), srcVars.end(), *v) == srcVars.end())
-            {
-              updateSrc = true;
-              srcVars.insert(*v);
-            }
-            v = varDeps.erase(v);
+            vector<int> newtrace = trace;
+            newtrace.push_back(a);
+            traces.push_back(newtrace);
           }
-          else ++v;
         }
       }
-
-      srcDep = varsSlice[hr->srcRelation];
-      dstDep = varDeps;
-
-      if (!hr->isQuery)
+      else
       {
-        ExprSet& dstVars = varsSlice[hr->dstRelation];
-        for (auto v = varDeps.begin(); v != varDeps.end();)
+        for (auto a : outgs[src])
         {
-          if (find(dst.begin(), dst.end(), *v) != dst.end())
+          if (chcs[a].dstRelation == dst ||
+              isRelVisited(trace, av, chcs[a].dstRelation))
+            continue;
+          vector<int> newtrace = trace;
+          newtrace.push_back(a);
+          getAllAcyclicTraces(chcs[a].dstRelation, dst, len-1, newtrace, traces, av);
+        }
+      }
+    }
+
+    void findCycles()
+    {
+      outgs.clear(); acyclic.clear(); cycles.clear();
+      prefixes.clear(); seqPoints.clear(); wtoCHCs.clear();
+      for (int i = 0; i < chcs.size(); i++)
+        outgs[chcs[i].srcRelation].push_back(i);
+
+      ExprVector av;
+      ExprVector endRels = {failDecl};
+      for (auto & d : decls)
+        if (outgs[d->left()].empty())
+          endRels.push_back(d->left());
+
+      for (auto & r : endRels)
+        findCycles(mk<TRUE>(m_efac), r, av);
+
+      outs () << "global traces num: " << acyclic.size() << "\n";
+      for (auto & a : cycles)
+        outs () << "  traces num for: " << a.first << ": " << a.second.size() << "\n";
+
+      for (auto & a : acyclic)
+      {
+        if (seqPoints.empty())
+          for (auto & i : a) seqPoints.push_back(chcs[i].dstRelation);
+        else
+          for (auto it = seqPoints.begin(); it != seqPoints.end(); )
           {
-            Expr vp = replaceAll(*v, dst, invVars[hr->dstRelation]);
-            if (find(dstVars.begin(), dstVars.end(), vp) == dstVars.end())
-            {
-              updateDst = true;
-              dstVars.insert(vp);
-            }
-            v = varDeps.erase(v);
+            bool f = false;
+            for (auto & i : a)
+              if (*it == chcs[i].dstRelation)
+                { f = true; break;}
+            if (f) ++it;
+            else it = seqPoints.erase(it);
           }
-          else ++v;
+        if (seqPoints.empty()) break;
+      }
+
+      outs() << "Relations visited in all runs:\n";
+      pprint(seqPoints);
+
+      cycleSearchDone = true;
+    }
+
+    bool findCycles(Expr src, Expr dst, ExprVector& avoid)
+    {
+      if (debug >= 2) outs () << "\nfindCycles:  " << src << " => " << dst << "\n";
+      vector<vector<int>> nonCycleTraces;
+      ExprVector highLevelRels;
+      for (int i = 1; i < chcs.size(); i++)
+      {
+        if (debug >= 2)
+        {
+          outs () << ".";
+          outs().flush();
+        }
+        getAllAcyclicTraces(src, dst, i, vector<int>(), nonCycleTraces, avoid);
+      }
+
+      bool tracesFound = nonCycleTraces.size() > 0;
+      map <Expr, vector<vector<int>>> prefs;
+      for (auto & d : nonCycleTraces)
+      {
+        vector<int> tmp;
+        for (auto & chcNum : d)
+        {
+          if (chcs[chcNum].isQuery) break;      // last iter anyway
+          Expr& r = chcs[chcNum].dstRelation;
+          tmp.push_back(chcNum);
+          if (find(avoid.begin(), avoid.end(), r) == avoid.end())
+          {
+            prefs[r].push_back(tmp);
+            unique_push_back(r, highLevelRels);
+          }
         }
       }
 
-      if (!varDeps.empty())
-        hr->body = eliminateQuantifiers(hr->body, varDeps, false);
+      if (tracesFound)
+        if (src == dst)
+          for (auto & c : nonCycleTraces) unique_push_back(c, cycles[src]);
+        else
+          for (auto & c : nonCycleTraces) unique_push_back(c, acyclic);
+      else
+        assert(src == dst);
 
-      if (updateSrc) updateTodo(hr->srcRelation, num);
-      if (updateDst) updateTodo(hr->dstRelation, num);
-      chcsToVisit.erase(num);
+      ExprVector avoid2 = avoid;
+      for (auto & d : highLevelRels)
+      {
+        avoid2.push_back(d);
+        bool nestedCycle = findCycles(d, d, avoid2);
+        if (nestedCycle)
+        {
+          prefixes[d] = prefs[d]; // to debug
+        }
+      }
+
+      // WTO sorting is here now:
+      if (tracesFound)
+      {
+        if (src == dst)
+        {
+          unique_push_back(src, loopheads);      // could there be duplicates?
+          if (debug) outs () << "  loophead found: " << src << "\n";
+        }
+        else if (debug) outs () << "  global:\n";
+      }
+
+      for (auto c : nonCycleTraces)
+      {
+        if (debug > 5)
+        {
+          outs () << "    trace: " << chcs[c[0]].srcRelation;
+          for (auto h : c)
+            outs () << " -> " << chcs[h].dstRelation << " ";
+          outs () << "\n";
+        }
+        // else if (debug)
+        // {
+        //   outs () << "traces num for " << chcs[c[0]].srcRelation << ": "
+        //           << c.size() << "\n";
+        // }
+
+        for (auto h : c)
+          unique_push_back(&chcs[h], wtoCHCs);
+      }
+
+      return tracesFound;
+    }
+
+    vector<int> getPrefix(Expr rel) // get only first one; to extend
+    {
+      assert(!cycles[rel].empty());
+      assert(!prefixes[rel].empty());
+      vector<int> pref = prefixes[rel][0];
+      assert(!pref.empty());
+      if (chcs[pref[0]].isFact)
+        return pref;
+      vector<int> ppref = getPrefix(chcs[pref[0]].srcRelation);
+      ppref.insert(ppref.end(), pref.begin(), pref.end());
+      return ppref;
     }
 
     bool hasCycles()
     {
-      if (cycles.size() > 0) return true;
-
-      for (int i = 0; i < chcs.size(); i++)
-        if (chcs[i].isFact) findCycles(i, vector<int>());
-
-      assert (cycles.size() == prefixes.size());
-      if (debug >= 3)
-        for (int i = 0; i < cycles.size(); i++)
-        {
-          auto & c = prefixes[i];
-          outs () << "      pref: ";
-          for (auto & chcNum : c) outs () << *chcs[chcNum].srcRelation << " -> ";
-          outs () << "    [";
-          for (auto & chcNum : c) outs () << chcNum << " -> ";
-          outs () << "]  ";
-          auto & d = cycles[i];
-          outs () << "      cycle: ";
-          for (auto & chcNum : d) outs () << *chcs[chcNum].srcRelation << " -> ";
-          outs () << "    [";
-          for (auto & chcNum : d) outs () << chcNum << " -> ";
-          outs () << "]\n";
-        }
+      if (cycleSearchDone) return cycles.size() > 0;
+      findCycles();
       return (cycles.size() > 0);
-    }
-
-    void findCycles(int chcNum, vector<int> vec)
-    {
-      Expr srcRel = chcs[chcNum].srcRelation;
-      Expr dstRel = chcs[chcNum].dstRelation;
-      bool res = false;
-      for (int i = 0; i < vec.size(); i++)
-      {
-        auto c = vec[i];
-        bool newCycle = (chcs[c].srcRelation == srcRel);
-        // TODO: some cycles can be redundant
-        if (newCycle)
-        {
-          cycles.push_back(vector<int>());
-          prefixes.push_back(vector<int>());
-          for (int j = 0; j < i; j++) prefixes.back().push_back(vec[j]);
-          res = true;
-        }
-        if (res)
-        {
-          cycles.back().push_back(c);
-        }
-      }
-
-      if (! res)
-      {
-        vec.push_back(chcNum);
-
-        for (auto & i : outgs[dstRel])
-        {
-          if (chcs[i].dstRelation == failDecl) continue;
-          bool newRel = true;
-          for (auto & c : cycles)
-          {
-            if (c[0] == i)
-            {
-              newRel = false;
-              break;
-            }
-          }
-          if (newRel) findCycles(i, vec);
-        }
-      }
-    }
-
-    vector<int> empt;
-    vector<int>& getCycleForRel(Expr rel)
-    {
-      for (auto & c : cycles)
-        if (chcs[c[0]].srcRelation == rel)
-          return c;
-      return empt;
-    }
-
-    vector<int>& getCycleForRel(int chcNum)
-    {
-      return getCycleForRel(chcs[chcNum].srcRelation);
-    }
-
-    HornRuleExt* getFirstRuleOutside (Expr rel)
-    {
-      for (auto & c : cycles)
-      {
-        if (chcs[c[0]].srcRelation == rel)
-        {
-          for (auto & a : outgs[rel])
-          {
-            if (a != c.back()) return &chcs[a];
-          }
-        }
-      }
-      return NULL;
-    }
-
-    void addRule (HornRuleExt* r)
-    {
-      chcs.push_back(*r);
-      Expr srcRel = r->srcRelation;
-      if (!isOpX<TRUE>(srcRel))
-      {
-        if (invVars[srcRel].size() == 0)
-        {
-          addDeclAndVars(srcRel, r->srcVars);
-        }
-      }
-      outgs[srcRel].push_back(chcs.size()-1);
-    }
-
-    void addDeclAndVars(Expr rel, ExprVector& args)
-    {
-      ExprVector types;
-      for (auto &var: args) {
-        types.push_back(bind::typeOf(var));
-      }
-      types.push_back(mk<BOOL_TY>(m_efac));
-
-      decls.insert(bind::fdecl (rel, types));
-      for (auto & v : args)
-      {
-        invVars[rel].push_back(v);
-      }
     }
 
     void addFailDecl(Expr decl)
     {
       if (failDecl == NULL)
-      {
         failDecl = decl;
-      }
       else
-      {
         if (failDecl != decl)
         {
           errs () << "Multiple queries are unsupported\n";
           exit (1);
         }
-      }
     }
 
     Expr getPrecondition (HornRuleExt* hr)
@@ -1405,71 +1335,6 @@ namespace ufo
       int n = 0;
       for (auto & c : chcs) if (c.isQuery) n++;
       return n;
-    }
-
-    // TODO: repair cycles
-    void wtoSort()
-    {
-      wtoCHCs.clear();
-      wtoDecls.clear();
-
-      // workaround, until cycles are repaired
-      for (auto & c : chcs) wtoCHCs.push_back(&c);
-      for (auto & c : decls) wtoDecls.push_back(c);
-
-      cycles.clear();
-      prefixes.clear();
-      hasCycles();
-      return;
-
-      int r1 = 0;
-
-      for (auto & c : cycles)
-      {
-        unique_push_back(chcs[c[0]].srcRelation, wtoDecls);
-        for (int i = 1; i < c.size(); i++)
-        {
-          unique_push_back(chcs[c[i]].dstRelation, wtoDecls);
-          unique_push_back(&chcs[c[i]], wtoCHCs);
-        }
-      }
-
-      int r2 = wtoDecls.size();
-      if (r2 == 0) return;
-
-      while (r1 != r2)
-      {
-        for (int i = r1; i < r2; i++)
-        {
-          auto dcl = wtoDecls[i];
-          for (auto &hr : chcs)
-          {
-            if (find(wtoCHCs.begin(), wtoCHCs.end(), &hr) != wtoCHCs.end())
-              continue;
-
-            if (hr.srcRelation == dcl)
-            {
-              unique_push_back(hr.dstRelation, wtoDecls);
-              unique_push_back(&hr, wtoCHCs);
-            }
-            else if (hr.dstRelation == dcl)
-            {
-              unique_push_back(hr.srcRelation, wtoDecls);
-              unique_push_back(&hr, wtoCHCs);
-            }
-          }
-        }
-        r1 = r2;
-        r2 = wtoDecls.size();
-      }
-      assert(wtoCHCs.size() == chcs.size());
-
-      // filter wtoDecls
-      for (auto it = wtoDecls.begin(); it != wtoDecls.end();)
-      {
-        if (*it == failDecl || isOpX<TRUE>(*it)) it = wtoDecls.erase(it);
-        else ++it;
-      }
     }
 
     void print (bool full = false, bool dump_cfg = false, string name = "chc")
@@ -1519,6 +1384,12 @@ namespace ufo
           else outs () << " < . . . . too large . . . . >\n";
         }
         else outs() << "\n";
+        if (full && hr.locVars.size() > 0)
+        {
+          outs () << "    loc vars: ";
+          pprint(hr.locVars, 0, false);
+          outs () << "\n";
+        }
         if (dump_cfg)
         {
           enc_chc << "\"" << hr.srcRelation << "\"";
