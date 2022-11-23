@@ -148,18 +148,19 @@ namespace ufo
 
     void addVar(Expr decl, Expr var, Expr varPr)
     {
+      if (contains(invVars[decl], var)) return;
       invVars[decl].push_back(var);
       invVarsPrime[decl].push_back(varPr);
       invVarsPrimeMap[decl][var] = varPr;
       invVarsMap[decl][varPr] = var;
     }
 
-    void resetVars(Expr decl)
+    void resetVars()
     {
-      invVars[decl].clear();
-      invVarsPrime[decl].clear();
-      invVarsPrimeMap[decl].clear();
-      invVarsMap[decl].clear();
+      invVars.clear();
+      invVarsPrime.clear();
+      invVarsPrimeMap.clear();
+      invVarsMap.clear();
     }
 
     bool isFapp (Expr e)
@@ -484,10 +485,14 @@ namespace ufo
       // set encoding is here
       ExprVector names;
       vector<HornRuleExt> tmp;
+      ExprSet updDecls;
+
+      if (setEnc) resetVars();
       for (auto & hr : chcs)
       {
         if (debug >= 3)
           outs () << "\n\n PROC " << hr.srcRelation << " -> " << hr.dstRelation << "\n";
+
         ExprSet rlin;
         ExprSet checks;
         if (setEnc)
@@ -517,6 +522,7 @@ namespace ufo
                 pprint(hr.dstTmp);
               }
             }
+
             if (!containsOp<AD_TY>(rl))
             {
               getConj(rl, rlin);
@@ -531,6 +537,29 @@ namespace ufo
                     mk<SELECT>(siz, mk<SELECT>(alloc, s->left()->right()))));
             }
           }
+
+          auto dstVars = invVars[hr.srcRelation];
+          assert(isSubset(hr.srcTmp, invVars[hr.srcRelation]));
+          for (auto & a : hr.dstTmp) unique_push_back(a, dstVars);
+
+          if (hr.isFact)
+          {
+            Expr cArr = mk<CONST_ARRAY>(s, op::bv::bvnum(mkMPZ(0, m_efac), s));
+            // assume that this fact does not rewrite _alloc
+            rlin.insert(mk<EQ>(allocP, cArr));
+            rlin.insert(mk<EQ>(auxP, cArr));
+            rlin.insert(mk<EQ>(offP, cArr));
+            dstVars.push_back(mem);
+            dstVars.push_back(alloc);
+            dstVars.push_back(aux);
+            dstVars.push_back(off);
+            dstVars.push_back(siz);
+          }
+
+          if (!hr.isQuery)
+            for (auto & v : dstVars)
+              addVar(hr.dstRelation, v, cloneVar(v,
+                 mkTerm<string> (lexical_cast<string>(v) + "'", m_efac)));
           hr.body = conjoin(rlin, m_efac);
         }
         else
@@ -551,98 +580,79 @@ namespace ufo
           }
         }
       }
-      for (auto & c : tmp) chcs.push_back(c);
+
+      if (setEnc)
+      {
+        bool toCont = true;
+        while (toCont)   // propagate
+        {
+          toCont = false;
+          for (auto & hr : chcs)
+          {
+            if (hr.isFact || hr.isQuery) continue;
+
+            for (auto & s : invVars[hr.srcRelation])
+            {
+              bool f = true;
+              for (auto & d : invVars[hr.dstRelation])
+              {
+                if (s == d)
+                {
+                  f = false;
+                  break;
+                }
+              }
+              if (f)
+              {
+                Expr vp = cloneVar(s,
+                   mkTerm<string> (lexical_cast<string>(s) + "'", m_efac));
+                addVar(hr.dstRelation, s, vp);
+                toCont = true;
+              }
+            }
+          }
+        }
+
+        for (auto & c : tmp) chcs.push_back(c);
+        for (auto & hr : chcs)
+        {
+          hr.srcVars = invVars[hr.srcRelation];
+          hr.dstVars = invVarsPrime[hr.dstRelation];
+
+          ExprSet lin;
+          getConj(hr.body, lin);
+
+          if (!hr.isFact && !hr.isQuery)
+          {
+            for (auto & vp : hr.dstVars)
+            {
+              auto v = invVarsMap[hr.dstRelation][vp];
+              if (!contains(hr.dstTmp, v)) lin.insert(mk<EQ>(vp, v));
+            }
+          }
+
+          hr.body = conjoin(lin, m_efac);
+        }
+
+        for (auto & d : decls)
+        {
+          ExprVector args = {d->left()};
+          for (auto & a : invVars[d->left()])
+            args.push_back(a->left()->last());
+          args.push_back(mk<BOOL_TY>(m_efac));
+          updDecls.insert(mknary<FDECL>(args));
+        }
+        decls = updDecls;
+      }
 
       sz = chcs.size();
       eliminateVacDecls(false);
       if (debug > 0)
         outs () << "Vacuity elimination (2): " << sz << " -> " << chcs.size() << "\n";
 
-      ExprSet allVars = {alloc, mem, off, siz, aux};
-      ExprVector allVarsV, allVarsVp;
-      if (setEnc)   // set-encoding
-      {
-        for (auto & hr : chcs)
-        {
-          allVars.insert(hr.srcTmp.begin(), hr.srcTmp.end());
-          allVars.insert(hr.dstTmp.begin(), hr.dstTmp.end());
-        }
-
-        minusSets(allVars, names);
-
-        for (auto & a : allVars)
-        {
-          allVarsV.push_back(a);
-          allVarsVp.push_back(cloneVar(a,
-                       mkTerm<string> (lexical_cast<string>(a) + "'", m_efac)));
-        }
-        ExprSet updDecls;
-        for (auto & d : decls)
-        {
-          ExprVector args;
-          args.push_back(*d->args_begin ());
-          for (auto & a : allVars) args.push_back(a->left()->last());
-          args.push_back(d->last());
-          updDecls.insert(mknary<FDECL>(args));
-        }
-        decls = updDecls;
-      }
-
-      map<Expr, bool> added;
-      for (auto & hr : chcs)
-      {
-        ExprSet lin;
-        getConj(hr.body, lin);
-
-        if (setEnc)   // set-encoding
-        {
-          if (!hr.isFact)
-            hr.srcVars = allVarsV;
-          else
-            hr.locVars.insert(hr.locVars.end(), allVarsV.begin(), allVarsV.end());
-
-          if (!hr.isQuery)
-          {
-            hr.dstVars = allVarsVp;
-            if (!added[hr.dstRelation])
-            {
-              added[hr.dstRelation] = true;
-              resetVars(hr.dstRelation);
-              for (int i = 0; i < allVarsV.size(); i++)
-                addVar(hr.dstRelation, allVarsV[i], allVarsVp[i]);
-            }
-          }
-          else
-            hr.locVars.insert(hr.locVars.end(), allVarsVp.begin(), allVarsVp.end());
-
-          if (hr.isFact)
-          {
-            Expr cArr = mk<CONST_ARRAY>(s, op::bv::bvnum(mkMPZ(0, m_efac), s));
-            // assume that this fact does not rewrite _alloc
-            lin.insert(mk<EQ>(allocP, cArr));
-            lin.insert(mk<EQ>(auxP, cArr));
-            lin.insert(mk<EQ>(offP, cArr));
-          }
-          else if (!hr.isQuery)
-          {
-            for (int i = 0; i < allVarsV.size(); i++)
-            {
-              if (find(hr.dstTmp.begin(), hr.dstTmp.end(), allVarsV[i])
-                                                            == hr.dstTmp.end())
-                lin.insert(mk<EQ>(allVarsVp[i], allVarsV[i]));
-            }
-          }
-          hr.body = conjoin(lin, m_efac);
-        }
-        hr.body = simpleQE(hr.body, hr.locVars);
-      }
-
       findCycles();
 
-      for (int i = 0; i < chcs.size(); i++)
-      {
-        allCHCs.push_back(&chcs[i]);
-      }
+      for (int i = 0; i < chcs.size(); i++) allCHCs.push_back(&chcs[i]);
 
       if (debug >= 0)
       {
@@ -650,7 +660,6 @@ namespace ufo
         print(debug >= 1, true);
       }
 
-      // TODO: wto and cycles to be completely rewritten
     }
 
     vector<int> simplCHCs;
@@ -736,10 +745,8 @@ namespace ufo
         print(debug >= 1, true);
       }
 
-      allCHCs.clear();
-      for (int i = 0; i < chcs.size(); i++) allCHCs.push_back(&chcs[i]);
-
       findCycles();
+      for (int i = 0; i < chcs.size(); i++) allCHCs.push_back(&chcs[i]);
       return true;
     }
 
@@ -1166,7 +1173,7 @@ namespace ufo
 
     void findCycles()
     {
-      outgs.clear(); acyclic.clear(); cycles.clear();
+      outgs.clear(); acyclic.clear(); cycles.clear(); allCHCs.clear();
       prefixes.clear(); seqPoints.clear(); wtoCHCs.clear();
       for (int i = 0; i < chcs.size(); i++)
         outgs[chcs[i].srcRelation].push_back(i);

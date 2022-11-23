@@ -619,6 +619,28 @@ namespace ufo
           }
         }
       }
+      else if (isOpX<NEQ>(exp))
+      {
+        auto lhs = exp->left();
+        auto rhs = exp->right();
+
+        if (find(names.begin(), names.end(), lhs) != names.end())
+        {
+          if (is_bvnum(rhs) && lexical_cast<string>(rhs->left()) == "0")
+          {
+            // lhs is not a nullpointer
+            return mk<NEQ>(mk<SELECT>(alloc, getVarId(lhs)), nums[0]);
+          }
+        }
+        if (find(names.begin(), names.end(), rhs) != names.end())
+        {
+          if (is_bvnum(lhs) && lexical_cast<string>(lhs->left()) == "0")
+          {
+            // rhs is not a nullpointer
+            return mk<NEQ>(mk<SELECT>(alloc, getVarId(rhs)), nums[0]);
+          }
+        }
+      }
       return exp;
     }
   };
@@ -684,7 +706,8 @@ namespace ufo
                  lexical_cast<string>(obj->left()->left()) == "object-address")
           {
             auto var = getVarByName(obj->last(), type);
-            varToDefs(defs, var);
+            if (find(names.begin(), names.end(), var) == names.end())
+              varToDefs(defs, var);
             if (isOpX<BOOL_TY>(type))
             {
               return var;
@@ -720,7 +743,6 @@ namespace ufo
             Expr h = getVarId(objj);
             Expr k = getVarId(field);
             typeSafeInsert(defs, mem);
-            typeSafeInsert(defs, objj);
             return extract(type,
               mk<SELECT>(mk<SELECT>(mem, mk<SELECT>(alloc, h)), k));
           }

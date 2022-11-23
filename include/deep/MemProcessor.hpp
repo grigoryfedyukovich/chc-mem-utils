@@ -798,6 +798,9 @@ namespace ufo
     map<int, map<int, ExprSet>> origs;
     void addToCandidates(int ind, Expr e, int debugMarker, bool split = true)
     {
+      Expr rel = decls[ind];
+      if (!hasOnlyVars(e, ruleManager.invVars[rel])) return;
+
       e = simplifyBool(simplifyBV(e));
       if (find(candidates[ind].begin(), candidates[ind].end(), e) !=
                candidates[ind].end()) return;
@@ -820,11 +823,9 @@ namespace ufo
       }
       if (isOpX<OR>(e) && e->arity() > 3 /* to amend */) return;
 
-      Expr rel = decls[ind];
       Expr lms = conjoin(sfs[ind].back().learnedExprs, m_efac);
       if (u.implies(lms, e)) return;
 
-      assert(hasOnlyVars(e, ruleManager.invVars[rel]));
       candidates[ind].push_back(e);
       origs[ind][debugMarker].insert(e);
 
