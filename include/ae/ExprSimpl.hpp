@@ -1889,6 +1889,13 @@ namespace ufo
     return simplifyBool(e);
   }
 
+  inline static Expr projectOnlyVars (Expr exp, ExprVector& v)
+  {
+    ExprSet w;
+    for (auto & a : v) w.insert(a);
+    return projectOnlyVars(exp, w);
+  }
+
   struct ReplaceNext
   {
     Expr s, t, &p, &r;

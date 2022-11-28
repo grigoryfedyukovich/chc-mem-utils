@@ -61,6 +61,7 @@ int main (int argc, char ** argv)
   const char *OPT_MEM = "--mem";
   const char *OPT_NORM = "--norm";
   const char *OPT_MSAF = "--memsafety";
+  const char *OPT_OPT = "--no-opt";
   const char *OPT_TO = "--to";
   const char *OPT_SER = "--serialize";
 
@@ -86,6 +87,7 @@ int main (int argc, char ** argv)
   int mut = getIntValue(OPT_MUT, 2, argc, argv);
   int norm = getIntValue(OPT_NORM, 0, argc, argv);
   int prj = getIntValue(OPT_PRJ, 3, argc, argv);
+  bool opt = getBoolValue(OPT_OPT, false, argc, argv);
   int to = getIntValue(OPT_TO, (cnt >= 2) ? 20000 : 700, argc, argv);
 
   //get names
@@ -109,6 +111,6 @@ int main (int argc, char ** argv)
   }
 
   process(string(argv[argc-1]), var_ids, memsaf, norm, dat,
-              cnt, mut, prj, serial, debug, mem, to);
+              cnt, mut, prj, serial, debug, mem, !opt, to);
   return 0;
 }

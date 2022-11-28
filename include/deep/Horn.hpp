@@ -17,8 +17,8 @@ namespace ufo
     ExprVector dstVars;
     ExprVector locVars;
 
-    ExprSet srcTmp;
-    ExprSet dstTmp;
+    ExprSet readVars;
+    ExprSet writeVars;
 
     ExprSet lin;
 
@@ -134,6 +134,7 @@ namespace ufo
     map<Expr, vector<vector<int>>> cycles, prefixes;
     vector<vector<int>> acyclic;
     ExprVector seqPoints;
+    map<Expr, ExprVector> newVars;
     map<Expr, bool> hasArrays;
     bool hasAnyArrays, hasBV = false;
     int debug;
@@ -142,6 +143,13 @@ namespace ufo
     ExprSet origVrs;
     map<Expr, ExprMap> origSrcVars;
     bool mems;
+
+    // data structures for frontend-optimizations (lightweight. no SMT)
+    map<int, set<pair<Expr, Expr>>> transit;
+    map<int, pair<map<Expr, int>, map<Expr, int>>> transused;
+    map<int, ExprSet> notused, singused;
+    ExprSet tranRemoved;
+    set<int> tranShrinked;
 
     CHCs(ExprFactory &efac, EZ3 &z3, bool _mems = false, int d = false) :
       u(efac), m_efac(efac), m_z3(z3), mems(_mems), hasAnyArrays(false), debug(d) {};
@@ -153,6 +161,39 @@ namespace ufo
       invVarsPrime[decl].push_back(varPr);
       invVarsPrimeMap[decl][var] = varPr;
       invVarsMap[decl][varPr] = var;
+    }
+
+    void removeVar(Expr decl, Expr var)
+    {
+      Expr varPr = invVarsPrimeMap[decl][var];
+      for (auto it = invVars[decl].begin(); it != invVars[decl].end(); )
+      {
+        if (*it == var)
+        {
+          it = invVars[decl].erase(it);
+          break;
+        }
+        else ++it;
+      }
+      for (auto it = invVarsPrime[decl].begin(); it != invVarsPrime[decl].end(); )
+      {
+        if (*it == varPr)
+        {
+          it = invVarsPrime[decl].erase(it);
+          break;
+        }
+        else ++it;
+      }
+    }
+
+    void removeVar(int i, Expr var)
+    {
+      ExprSet lin;
+      getConj(chcs[i].body, lin);
+      for (auto it = lin.begin(); it != lin.end();)
+        if (contains(*it, var)) it = lin.erase(it);
+          else ++it;
+      chcs[i].body = conjoin(lin, m_efac);
     }
 
     void resetVars()
@@ -281,7 +322,7 @@ namespace ufo
       return true;
     }
 
-    void parse(string smt, bool setEnc = true)
+    void parse(string smt, bool setEnc = true, bool opt = true)
     {
       if (debug > 0) outs () << "\nPARSING" << "\n=======\n";
       std::unique_ptr<ufo::ZFixedPoint <EZ3> > m_fp;
@@ -415,21 +456,24 @@ namespace ufo
 
       Expr s = op::bv::bvsort (64, m_efac); // hardcode for now
       Expr alloc, mem, allocP, memP, off, offP, siz, sizP, aux, auxP;
-      alloc = mkTerm<string> ("_alloc", m_efac);
-      mem = mkTerm<string> ("_mem", m_efac);
-      off = mkTerm<string> ("_off", m_efac);
-      siz = mkTerm<string> ("_siz", m_efac);
-      aux = mkTerm<string> ("_aux", m_efac);
-      alloc = mkConst(alloc, mk<ARRAY_TY> (s, s));
-      mem = mkConst(mem, mk<ARRAY_TY> (s, mk<ARRAY_TY> (s, s)));
-      off = mkConst(off, mk<ARRAY_TY> (s, s));
-      siz = mkConst(siz, mk<ARRAY_TY> (s, s));
-      aux = mkConst(aux, mk<ARRAY_TY> (s, s));
-      allocP = cloneVar(alloc, mkTerm<string> ("_alloc'", m_efac));
-      memP = cloneVar(mem, mkTerm<string> ("_mem'", m_efac));
-      offP = cloneVar(off, mkTerm<string> ("_off'", m_efac));
-      sizP = cloneVar(siz, mkTerm<string> ("_siz'", m_efac));
-      auxP = cloneVar(siz, mkTerm<string> ("_aux'", m_efac));
+      if (setEnc)
+      {
+        alloc = mkTerm<string> ("_alloc", m_efac);
+        mem = mkTerm<string> ("_mem", m_efac);
+        off = mkTerm<string> ("_off", m_efac);
+        siz = mkTerm<string> ("_siz", m_efac);
+        aux = mkTerm<string> ("_aux", m_efac);
+        alloc = mkConst(alloc, mk<ARRAY_TY> (s, s));
+        mem = mkConst(mem, mk<ARRAY_TY> (s, mk<ARRAY_TY> (s, s)));
+        off = mkConst(off, mk<ARRAY_TY> (s, s));
+        siz = mkConst(siz, mk<ARRAY_TY> (s, s));
+        aux = mkConst(aux, mk<ARRAY_TY> (s, s));
+        allocP = cloneVar(alloc, mkTerm<string> ("_alloc'", m_efac));
+        memP = cloneVar(mem, mkTerm<string> ("_mem'", m_efac));
+        offP = cloneVar(off, mkTerm<string> ("_off'", m_efac));
+        sizP = cloneVar(siz, mkTerm<string> ("_siz'", m_efac));
+        auxP = cloneVar(siz, mkTerm<string> ("_aux'", m_efac));
+      }
 
       if (failDecl == NULL) failDecl = mk<FALSE>(m_efac);
       HornRuleExt & hrprev = *chcs.begin();
@@ -485,7 +529,6 @@ namespace ufo
       // set encoding is here
       ExprVector names;
       vector<HornRuleExt> tmp;
-      ExprSet updDecls;
 
       if (setEnc) resetVars();
       for (auto & hr : chcs)
@@ -502,24 +545,24 @@ namespace ufo
             if (debug >= 3)
               outs () << "\n------\n  orig: " << l << "\n";
             Expr rl = l;
-            if (!hr.isFact) rl = evalReplace(rl, hr.srcTmp,
+            if (!hr.isFact) rl = evalReplace(rl, hr.readVars,
               alloc, mem, off, siz, aux, allocP, memP, offP, sizP, auxP, names);
-            rl = rewriteSet(rl, hr.dstTmp,
+            rl = rewriteSet(rl, hr.writeVars,
               alloc, mem, off, siz, aux, allocP, memP, offP, sizP, auxP, names);
             rl = typeRepair(rl);
             rl = simplifyBool(rl);
             if (debug >= 3)
             {
               outs () << "  conv: " << rl << "\n";
-              if (!hr.srcTmp.empty())
+              if (!hr.readVars.empty())
               {
                 outs () << "  new src vars: ";
-                pprint(hr.srcTmp);
+                pprint(hr.readVars);
               }
-              if (!hr.dstTmp.empty())
+              if (!hr.writeVars.empty())
               {
                 outs () << "  new dst vars: ";
-                pprint(hr.dstTmp);
+                pprint(hr.writeVars);
               }
             }
 
@@ -539,8 +582,8 @@ namespace ufo
           }
 
           auto dstVars = invVars[hr.srcRelation];
-          assert(isSubset(hr.srcTmp, invVars[hr.srcRelation]));
-          for (auto & a : hr.dstTmp) unique_push_back(a, dstVars);
+          assert(isSubset(hr.readVars, invVars[hr.srcRelation]));
+          for (auto & a : hr.writeVars) unique_push_back(a, dstVars);
 
           if (hr.isFact)
           {
@@ -627,22 +670,14 @@ namespace ufo
             for (auto & vp : hr.dstVars)
             {
               auto v = invVarsMap[hr.dstRelation][vp];
-              if (!contains(hr.dstTmp, v)) lin.insert(mk<EQ>(vp, v));
+              if (!contains(hr.writeVars, v)) lin.insert(mk<EQ>(vp, v));
             }
           }
 
           hr.body = conjoin(lin, m_efac);
         }
 
-        for (auto & d : decls)
-        {
-          ExprVector args = {d->left()};
-          for (auto & a : invVars[d->left()])
-            args.push_back(a->left()->last());
-          args.push_back(mk<BOOL_TY>(m_efac));
-          updDecls.insert(mknary<FDECL>(args));
-        }
-        decls = updDecls;
+        updateDecls();
       }
 
       sz = chcs.size();
@@ -650,16 +685,75 @@ namespace ufo
       if (debug > 0)
         outs () << "Vacuity elimination (2): " << sz << " -> " << chcs.size() << "\n";
 
+      for (auto & hr : chcs)
+      {
+        hr.body = simpleQE(hr.body, hr.locVars);
+        hr.shrinkLocVars();
+      }
+
       findCycles();
+
+      if (opt)
+      {
+        if (debug > 1)
+        {
+          outs () << "  Parsed CHCs:\n";
+          print(debug >= 1, true);
+        }
+
+        if (setEnc)
+        {
+          if (debug > 0)
+          {
+            outs() << "Points visited in all runs:\n";
+            pprint(seqPoints);
+          }
+          for (auto & r : seqPoints)
+            for (auto & h : chcs)
+              if (h.dstRelation == r)
+              {
+                if (h.isFact)
+                  newVars[r] = invVars[r];
+                else
+                  for (auto & v : invVars[r])
+                    if (!contains(invVars[h.srcRelation], v))
+                      unique_push_back(v, newVars[r]);
+              }
+          if (debug > 0)
+            for (auto & a : newVars)
+            {
+              outs () << "New vars introduced at " << a.first << ":\n    ";
+              pprint(a.second);
+            }
+        }
+
+        eliminateTransitVars();
+      }
 
       for (int i = 0; i < chcs.size(); i++) allCHCs.push_back(&chcs[i]);
 
-      if (debug >= 0)
+      if (debug > 0)
       {
-        outs () << "  Parsed CHCs:\n";
+        if (opt)
+          outs () << "  Optimized CHCs:\n";
+        else
+          outs () << "  Parsed CHCs:\n";
         print(debug >= 1, true);
       }
+    }
 
+    void updateDecls()
+    {
+      ExprSet updDecls;
+      for (auto & d : decls)
+      {
+        ExprVector args = {d->left()};
+        for (auto & a : invVars[d->left()])
+          args.push_back(a->left()->last());
+        args.push_back(mk<BOOL_TY>(m_efac));
+        updDecls.insert(mknary<FDECL>(args));
+      }
+      decls = updDecls;
     }
 
     vector<int> simplCHCs;
@@ -1104,6 +1198,239 @@ namespace ufo
       }
     }
 
+    // front-end optimizations: helper methods for `eliminateTransitVars`
+    bool exploreLoops (Expr decl, Expr var)
+    {
+      for (auto & a : cycles[decl])
+      {
+        for (int i : a)
+        {
+          auto & hr = chcs[i];
+          if (hr.dstRelation != decl && contains(loopheads, hr.dstRelation))
+            if (!exploreLoops(hr.dstRelation, var))
+              return false;
+          int b = 0;
+          for (auto & t : transit[i])
+          {
+            if (t.first == var)
+            {
+              if (transused[i].first[var] + transused[i].second[t.second] == 0)
+              {
+                var = invVarsMap[hr.dstRelation][t.second];
+                b = 1;
+              }
+              else return false;
+            }
+          }
+          if (b == 0) return false;
+        }
+      }
+      return true;
+    }
+
+    bool exploreAcyclic (Expr decl, Expr var)
+    {
+      for (auto & a : acyclic)
+      {
+        int use;
+        bool met = false;
+        for (int i : a)
+        {
+          auto & hr = chcs[i];
+          met |= (hr.dstRelation == decl);
+          if (!met) continue;
+
+          if (hr.dstRelation == decl &&
+            (contains(singused[i], var)) || contains(notused[i], var))
+          {
+            use = contains(singused[i], var);
+            continue;
+          }
+
+          if (contains(loopheads, hr.dstRelation))
+            if (!exploreLoops(hr.dstRelation, var))
+              return false;
+
+          int b = 0;
+          for (auto & t : transit[i])
+          {
+            if (t.first == var)
+            {
+              use += transused[i].first[var] + transused[i].second[t.second];
+              if (use <= 1)
+              {
+                var = invVarsMap[hr.dstRelation][t.second];
+                b = 1;
+              }
+              else return false;
+            }
+          }
+          if (b == 0) return false;
+        }
+      }
+      return true;
+    }
+
+    void remTransLoops (Expr decl, Expr var)
+    {
+      for (auto & a : cycles[decl])
+      {
+        for (int i : a)
+        {
+          auto & hr = chcs[i];
+          if (hr.dstRelation != decl && contains(loopheads, hr.dstRelation))
+            remTransLoops(var, hr.dstRelation);
+
+          for (auto & t : transit[i])
+          {
+            if (t.first == var)
+            {
+              if (!contains(tranRemoved, hr.dstRelation))
+              {
+                removeVar(hr.dstRelation, var);
+                tranRemoved.insert(hr.dstRelation);
+              }
+              if (!contains(tranShrinked, i))
+              {
+                removeVar(i, var);
+                tranShrinked.insert(i);
+              }
+              var = invVarsMap[hr.dstRelation][t.second];
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    void remTransAcyclic (Expr decl, Expr var)
+    {
+      for (auto & a : acyclic)
+      {
+        bool met = false;
+        for (int i : a)
+        {
+          auto & hr = chcs[i];
+          met |= (hr.dstRelation == decl);
+          if (!met) continue;
+
+          if (hr.dstRelation == decl)
+          {
+            removeVar(hr.dstRelation, var);
+            removeVar(i, invVarsPrimeMap[decl][var]);
+          }
+
+          if (contains(loopheads, hr.dstRelation))
+            remTransLoops(hr.dstRelation, var);
+
+          for (auto & t : transit[i])
+          {
+            if (t.first == var)
+            {
+              if (!contains(tranRemoved, hr.dstRelation))
+              {
+                removeVar(hr.dstRelation, var);
+                tranRemoved.insert(hr.dstRelation);
+              }
+              if (!contains(tranShrinked, i))
+              {
+                removeVar(i, var);
+                removeVar(i, invVarsPrimeMap[hr.dstRelation][t.second]);
+                tranShrinked.insert(i);
+              }
+              var = invVarsMap[hr.dstRelation][t.second];
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    void eliminateTransitVars()
+    {
+      for (int i = 0; i < chcs.size(); i++)
+      {
+        auto & hr = chcs[i];
+        ExprSet cnjs;
+        getConj(hr.body, cnjs);
+        map<Expr, ExprSet> vars;      // preps
+        for (auto & b : cnjs)
+          filter(b, bind::IsConst(), std::inserter (vars[b], vars[b].begin ()));
+
+        ExprSet transSrc, transDst;
+        for (auto & b : cnjs)
+        {
+          if (isOpX<EQ>(b))
+          {
+            Expr l = b->left();
+            Expr r = b->right();
+            Expr s = NULL, d = NULL;
+            if (contains(hr.srcVars, l) && contains(hr.dstVars, r))
+              { s = l; d = r; }
+            else if (contains(hr.srcVars, r) && contains(hr.dstVars, l))
+              { s = r; d = l; }
+            if (s != NULL && d != NULL)
+            {
+              transSrc.insert(s);
+              transDst.insert(d);
+              transit[i].insert({s, d});
+              int f1 = 0, f2 = 0;
+              for (auto b1 : cnjs)
+              {
+                if (b == b1) continue;
+                if (contains(vars[b1], s)) f1++;
+                if (contains(vars[b1], d)) f2++;
+              }
+              transused[i].first[s] = f1;
+              transused[i].second[d] = f2;
+            }
+          }
+        }
+
+        for (auto & v : hr.srcVars)
+        {
+          if (contains(transSrc, v)) continue;
+          int f = 0;
+          for (auto & b : cnjs)
+            if (contains(vars[b], v))
+              f++;
+          if (f == 0) notused[i].insert(v);
+          if (f == 1) singused[i].insert(v);
+        }
+
+        for (auto & v : hr.dstVars)
+        {
+          if (contains(transDst, v)) continue;
+          int f = 0;
+          for (auto & b : cnjs)
+            if (contains(vars[b], v))
+              f++;
+          auto w = invVarsMap[hr.dstRelation][v];
+          if (f == 0) notused[i].insert(w);
+          if (f == 1) singused[i].insert(w);
+        }
+      }
+      for (auto & a : newVars)
+      {
+        for (auto & v : a.second)
+        {
+          if (exploreAcyclic(a.first, v))
+          {
+            tranRemoved.clear();
+            tranShrinked.clear();
+            remTransAcyclic(a.first, v);
+          }
+        }
+      }
+      updateDecls();
+      for (auto & hr : chcs)
+      {
+        hr.srcVars = invVars[hr.srcRelation];
+        hr.dstVars = invVarsPrime[hr.dstRelation];
+      }
+    }
+
+    // helper methods for `findCycles`
     void getAllTraces (Expr src, Expr dst, int len, vector<int> trace,
                 vector<vector<int>>& traces, bool once = false)
     {
@@ -1207,10 +1534,6 @@ namespace ufo
           }
         if (seqPoints.empty()) break;
       }
-
-      outs() << "Relations visited in all runs:\n";
-      pprint(seqPoints);
-
       cycleSearchDone = true;
     }
 
@@ -1430,6 +1753,7 @@ namespace ufo
         enc_chc << ") Bool)\n";
       }
       enc_chc << "\n";
+      enc_chc.flush();
       for (auto & c : chcs)
       {
         Expr src, dst;
@@ -1448,6 +1772,7 @@ namespace ufo
             }
           }
         }
+
         if (c.isQuery)
         {
           dst = mk<FALSE>(m_efac);
@@ -1466,6 +1791,7 @@ namespace ufo
         if (c.isInductive) enc_chc << "; inductive\n";
         else if (c.isFact) enc_chc << "; fact\n";
         else if (c.isQuery) enc_chc << "; query\n";
+
         enc_chc << "(assert ";
         u.print(mkQFla(mk<IMPL>(mk<AND>(src, c.body), dst), true), enc_chc);
         enc_chc << ")\n\n";

@@ -974,38 +974,34 @@ namespace ufo
 
       for (auto bb : cnjs)
       {
-        if (hasOnlyVars(bb, varsp))
+        bb = projectOnlyVars(bb, varsp);
+        if (vars != varsp) bb = replaceAll(bb, varsp, vars);
         {
-          if (vars != varsp) bb = replaceAll(bb, varsp, vars);
+          ExprSet factored;
+          getConj(factor(bb, prj), factored);
+          for (auto & f : factored)
           {
-            ExprSet factored;
-            getConj(factor(bb, prj), factored);
+            addToCandidates(ind, f, debugMarker, false);
+            if (isOpX<EQ>(f))
             {
-              for (auto & f : factored)
+              if (isOpX<SELECT>(f->left()) && contains(allArrVars, f->left()->left()))
               {
-                addToCandidates(ind, f, debugMarker, false);
-                if (isOpX<EQ>(f))
+                if (true == u.equalsTo(f->right(), mkMPZ(0, m_efac)))
                 {
-                  if (isOpX<SELECT>(f->left()) && contains(allArrVars, f->left()->left()))
-                  {
-                    if (true == u.equalsTo(f->right(), mkMPZ(0, m_efac)))
-                    {
-                      Expr up = f->left()->right();
-                      if (printLog)
-                        outs () << "  storing zero at " << up << "\n";
-                      upbounds[decls[ind]].insert(up);
-                    }
-                  }
-                  else if (isOpX<SELECT>(f->right()) && contains(allArrVars, f->right()->left()))
-                  {
-                    if (true == u.equalsTo(f->left(), mkMPZ(0, m_efac)))
-                    {
-                      Expr up = f->right()->right();
-                      if (printLog)
-                        outs () << "  storing zero at " << up << "\n";
-                      upbounds[decls[ind]].insert(up);
-                    }
-                  }
+                  Expr up = f->left()->right();
+                  if (printLog)
+                    outs () << "  storing zero at " << up << "\n";
+                  upbounds[decls[ind]].insert(up);
+                }
+              }
+              else if (isOpX<SELECT>(f->right()) && contains(allArrVars, f->right()->left()))
+              {
+                if (true == u.equalsTo(f->left(), mkMPZ(0, m_efac)))
+                {
+                  Expr up = f->right()->right();
+                  if (printLog)
+                    outs () << "  storing zero at " << up << "\n";
+                  upbounds[decls[ind]].insert(up);
                 }
               }
             }
@@ -2019,13 +2015,13 @@ namespace ufo
   inline void process(string smt,
                 map<int, string>& varIds,  // obsolete, to remove
                 bool memsafety, int norm, bool dat, int cnt, int mut, int prj,
-                int serial, int debug, int mem, int to)
+                int serial, int debug, int mem, bool opt, int to)
   {
     ExprFactory m_efac;
     EZ3 z3(m_efac);
 
     CHCs ruleManager(m_efac, z3, memsafety, debug - 2);
-    ruleManager.parse(smt, mem);
+    ruleManager.parse(smt, mem, opt);
 
     if (debug > 0)
     {
