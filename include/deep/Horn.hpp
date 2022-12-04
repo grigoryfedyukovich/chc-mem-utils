@@ -163,6 +163,13 @@ namespace ufo
       invVarsMap[decl][varPr] = var;
     }
 
+    void addVar(Expr decl, Expr var)
+    {
+      Expr varPr = cloneVar(var,
+         mkTerm<string> (lexical_cast<string>(var) + "'", m_efac));
+      addVar(decl, var, varPr);
+    }
+
     void removeVar(Expr decl, Expr var)
     {
       Expr varPr = invVarsPrimeMap[decl][var];
@@ -582,7 +589,18 @@ namespace ufo
           }
 
           auto dstVars = invVars[hr.srcRelation];
-          assert(isSubset(hr.readVars, invVars[hr.srcRelation]));
+
+          for (auto it = hr.readVars.begin(); it != hr.readVars.end(); ++it)
+          {
+            if (find(invVars[hr.srcRelation].begin(),
+                     invVars[hr.srcRelation].end(), *it) ==
+                     invVars[hr.srcRelation].end())
+            {
+              errs() << "WARNING: variable " << *it << " is not initialized\n";
+              addVar(hr.srcRelation, *it);
+            }
+          }
+
           for (auto & a : hr.writeVars) unique_push_back(a, dstVars);
 
           if (hr.isFact)
@@ -601,8 +619,7 @@ namespace ufo
 
           if (!hr.isQuery)
             for (auto & v : dstVars)
-              addVar(hr.dstRelation, v, cloneVar(v,
-                 mkTerm<string> (lexical_cast<string>(v) + "'", m_efac)));
+              addVar(hr.dstRelation, v);
           hr.body = conjoin(rlin, m_efac);
         }
         else
@@ -647,9 +664,7 @@ namespace ufo
               }
               if (f)
               {
-                Expr vp = cloneVar(s,
-                   mkTerm<string> (lexical_cast<string>(s) + "'", m_efac));
-                addVar(hr.dstRelation, s, vp);
+                addVar(hr.dstRelation, s);
                 toCont = true;
               }
             }
@@ -657,6 +672,13 @@ namespace ufo
         }
 
         for (auto & c : tmp) chcs.push_back(c);
+
+        if (getQum() == 0)
+        {
+          errs () << "CHC system has no queries\n";
+          exit(0);
+        }
+
         for (auto & hr : chcs)
         {
           hr.srcVars = invVars[hr.srcRelation];
@@ -679,7 +701,6 @@ namespace ufo
 
         updateDecls();
       }
-
       sz = chcs.size();
       eliminateVacDecls(false);
       if (debug > 0)
@@ -1514,10 +1535,12 @@ namespace ufo
       for (auto & r : endRels)
         findCycles(mk<TRUE>(m_efac), r, av);
 
-      outs () << "global traces num: " << acyclic.size() << "\n";
-      for (auto & a : cycles)
-        outs () << "  traces num for: " << a.first << ": " << a.second.size() << "\n";
-
+      if (debug > 0)
+      {
+        outs () << "global traces num: " << acyclic.size() << "\n";
+        for (auto & a : cycles)
+          outs () << "  traces num for: " << a.first << ": " << a.second.size() << "\n";
+      }
       for (auto & a : acyclic)
       {
         if (seqPoints.empty())
@@ -1595,9 +1618,9 @@ namespace ufo
         if (src == dst)
         {
           unique_push_back(src, loopheads);      // could there be duplicates?
-          if (debug) outs () << "  loophead found: " << src << "\n";
+          if (debug > 0) outs () << "  loophead found: " << src << "\n";
         }
-        else if (debug) outs () << "  global:\n";
+        else if (debug > 0) outs () << "  global:\n";
       }
 
       for (auto c : nonCycleTraces)

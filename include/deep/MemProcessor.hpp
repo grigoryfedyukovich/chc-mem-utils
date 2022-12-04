@@ -921,13 +921,7 @@ namespace ufo
           }
         }
 
-        ExprVector toAvoid;
-        for (auto & v : c.dstVars)
-          if (lexical_cast<string>(v).find("$tmp") != string::npos)
-            toAvoid.push_back(v);
-
-        b = simpleQE(b, c.locVars, toAvoid);
-
+        b = simpleQE(b, c.locVars);
         b = factor(b, norm); // to elaborate on
 
         c.body = b;
@@ -963,59 +957,32 @@ namespace ufo
     void preproAdder(Expr a, ExprVector& vars, ExprVector& varsp,
                      int ind, int debugMarker)
     {
-      auto b = simplifyBV(simplifyArr(a));
+      auto b = simplifyArr(a);
       b = rewriteSelectStore(b);
-      b = u.removeITE(b);
+      b = simplifyBV(b);
+      b = simplifyBool(b);
       b = keepQuantifiersReplWeak(b, varsp);
       ExprSet cnjs;
-      getConj(b, cnjs);
+      getConj(factor(b, prj), cnjs);
+      if (isOpX<EQ>(a) && isArray(a->left())) cnjs.insert(a); // for arrays and further simplification
 
-      if (isOpX<EQ>(a)) cnjs.insert(a); // for arrays and further simplification
-
-      for (auto bb : cnjs)
+      for (auto f : cnjs)
       {
-        bb = projectOnlyVars(bb, varsp);
-        if (vars != varsp) bb = replaceAll(bb, varsp, vars);
-        {
-          ExprSet factored;
-          getConj(factor(bb, prj), factored);
-          for (auto & f : factored)
-          {
-            addToCandidates(ind, f, debugMarker, false);
-            if (isOpX<EQ>(f))
+        f = projectOnlyVars(f, varsp);
+        if (vars != varsp) f = replaceAll(f, varsp, vars);
+        addToCandidates(ind, f, debugMarker, false);
+        if (!isOpX<EQ>(f)) continue;
+        const pair<Expr, Expr> subs[] = {{f->left(), f->right()},
+                                         {f->right(), f->left()}};
+        for (auto a : subs)
+          if (isOpX<SELECT>(a.first))
+            if (contains(allArrVars, a.first->left()) && isZero(a.second))
             {
-              if (isOpX<SELECT>(f->left()) && contains(allArrVars, f->left()->left()))
-              {
-                if (true == u.equalsTo(f->right(), mkMPZ(0, m_efac)))
-                {
-                  Expr up = f->left()->right();
-                  if (printLog)
-                    outs () << "  storing zero at " << up << "\n";
-                  upbounds[decls[ind]].insert(up);
-                }
-              }
-              else if (isOpX<SELECT>(f->right()) && contains(allArrVars, f->right()->left()))
-              {
-                if (true == u.equalsTo(f->left(), mkMPZ(0, m_efac)))
-                {
-                  Expr up = f->right()->right();
-                  if (printLog)
-                    outs () << "  storing zero at " << up << "\n";
-                  upbounds[decls[ind]].insert(up);
-                }
-              }
+              if (printLog)
+                outs () << "  storing zero at " << a.first->right() << "\n";
+              upbounds[decls[ind]].insert(a.first->right());
             }
-          }
-        }
       }
-    }
-
-    bool varNoise(Expr var)
-    {
-      if (lexical_cast<string>(var).find("$tmp") != string::npos) return true;
-      if (lexical_cast<string>(var).find("__CPROVER") != string::npos) return true;
-      if (lexical_cast<string>(var).find("VERIFIER") != string::npos) return true;
-      return false;
     }
 
     void processFact(HornRuleExt& c)
@@ -1030,16 +997,12 @@ namespace ufo
       {
         for (auto it1 = v.begin(); it1 != v.end(); it1++)
         {
-          if (varNoise(*it1)) continue;
           for (auto it2 = it1; it2 != (prj > 1 ? v.end() : std::next(it1)); it2++)
           {
-            if (varNoise(*it2)) continue;
             for (auto it3 = it2; it3 != (prj > 2 ? v.end() : std::next(it2)); it3++)
             {
-              if (varNoise(*it3)) continue;
               for (auto it4 = it3; it4 != (prj > 3 ? v.end() : std::next(it3)); it4++)
               {
-                if (varNoise(*it4)) continue;
                 ExprSet vars = {*it1, *it2, *it3, *it4};
                 bodyProjs.insert(projectOnlyVars(a, vars));
               }
@@ -1051,11 +1014,8 @@ namespace ufo
       bodyCnjs.insert(bodyProjs.begin(), bodyProjs.end());
 
       for (auto a : bodyCnjs)
-      {
-        a = simplifyBV(simplifyArr(a));
         preproAdder(a, ruleManager.invVars[c.dstRelation],
                        ruleManager.invVarsPrime[c.dstRelation], indDst, 0);
-      }
     }
 
     void processQuery(HornRuleExt& c)
@@ -1142,7 +1102,8 @@ namespace ufo
           if (!isOpX<EQ>(a)) continue;
           if (isArray(a->left()))
           {
-            auto b = u.removeITE(rewriteSelectStore(a));
+            auto b = rewriteSelectStore(a);
+            b = simplifyBool(simplifyBV(b));
             if (a != b)
               getConj(b, bodyCnjsExt);
           }
@@ -2078,7 +2039,11 @@ namespace ufo
         outs() << "\nCHCs after memory-rewriting and simplification:\n";
         ruleManager.print((debug > 3), false);
       }
-      if (!res) return;
+      if (!res)
+      {
+        errs() << "unsat\n";
+        return;
+      }
     }
     else
     {

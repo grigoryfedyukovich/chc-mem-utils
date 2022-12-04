@@ -22,13 +22,25 @@ namespace ufo
     return res;
   }
 
-  template<typename Range> static Expr mkbadd(Range& terms, Expr ty, ExprFactory &efac){
-    if (terms.empty()) return bvnum(mkMPZ (0, efac), ty);
+  template<typename Op, typename Range> static Expr mkb(Range& terms, Expr neut)
+  {
+    if (terms.empty()) return neut;
     if (terms.size() == 1) return *terms.begin();
-    Expr tmp = mk<BADD>(eraseLexicogrMinimal(terms), eraseLexicogrMinimal(terms));
+    Expr tmp = mk<Op>(eraseLexicogrMinimal(terms), eraseLexicogrMinimal(terms));
     while (!terms.empty())
-      tmp = mk<BADD>(tmp, eraseLexicogrMinimal(terms));
+      tmp = mk<Op>(tmp, eraseLexicogrMinimal(terms));
     return tmp;
+  }
+
+  template<typename Op> static void getBVOps (Expr a, ExprVector &ops)
+  {
+    if (isOpX<Op>(a)){
+      for (unsigned i = 0; i < a->arity(); i++){
+        getBVOps<Op>(a->arg(i), ops);
+      }
+    } else {
+      ops.push_back(a);
+    }
   }
 
   inline static Expr extractVal (Expr a, Expr k)
@@ -111,15 +123,29 @@ namespace ufo
 
   bool isZero(Expr t)
   {
-    if (isOpX<BMUL>(t) && t->arity() == 2)
-    {
-      if (lexical_cast<cpp_int>(t->left()->left()) == 0)
+    if (is_bvnum(t))
+      if (lexical_cast<cpp_int>(t->left()) == 0)
         return true;
+    if (isOpX<BMUL>(t))
+    {
+      ExprVector ops;
+      getBVOps<BMUL>(t, ops);
+      for (auto & a : ops)
+        if (isZero(a))
+          return true;
     }
     else if (isOpX<BEXTRACT>(t))
       return isZero(t->last());
     else if (isOpX<BSEXT>(t) || isOpX<BZEXT>(t))
       return isZero(t->left());
+    return false;
+  }
+
+  bool isOne(Expr t)
+  {
+    if (is_bvnum(t))
+      if (lexical_cast<cpp_int>(t->left()) == 1)
+        return true;
     return false;
   }
 
@@ -199,7 +225,8 @@ namespace ufo
 
     if (comm > 0) ptrms.push_back(bvnum(mkMPZ(comm, efac), ty));
     if (comm < 0) ntrms.push_back(bvnum(mkMPZ(-comm, efac), ty));
-    return mk<OP>(mkbadd(ptrms, ty, efac), mkbadd(ntrms, ty, efac));
+    auto z = bvnum(mkMPZ (0, efac), ty);
+    return mk<OP>(mkb<BADD>(ptrms, z), mkb<BADD>(ntrms, z));
   }
 
   inline static Expr repairBPrio (Expr e, Expr lhs)
@@ -224,7 +251,8 @@ namespace ufo
     if (ptrms.size() != 1) return NULL;
 
     if (comm != 0) ntrms.push_back(bvnum(mkMPZ(-comm, efac), ty));
-    return reBuildCmp(e, mkbadd(ptrms, ty, efac), mkbadd(ntrms, ty, efac));
+    auto z = bvnum(mkMPZ (0, efac), ty);
+    return reBuildCmp(e, mkb<BADD>(ptrms, z), mkb<BADD>(ntrms, z));
   }
 
   struct SimplifyBVExpr
@@ -278,6 +306,10 @@ namespace ufo
               width(typeOf(exp->right()->left())))
               return reBuildCmp(exp, exp->left()->left(), exp->right()->left());
       }
+      if (!is_bvnum(exp) && isZero(exp))
+      {
+        return bvnum(mkMPZ(0, exp->getFactory()), typeOf(exp));
+      }
       if (isOpX<BEXTRACT>(exp))
       {
         if (isOpX<BEXTRACT>(exp->last()))
@@ -291,29 +323,23 @@ namespace ufo
       }
       if (isOpX<BADD>(exp) && exp->arity() == 2)
       {
-        if (is_bvnum(exp->left()) && lexical_cast<cpp_int>(exp->left()->left()) == 0)
-          return exp->right();
-        if (is_bvnum(exp->right()) && lexical_cast<cpp_int>(exp->right()->left()) == 0)
-          return exp->left();
         ExprVector terms;
         // to extend...
         for (auto it = exp->args_begin (), end = exp->args_end (); it != end; ++it)
-          terms.push_back(*it);
-        return mkbadd(terms, typeOf(exp), exp->getFactory());
+          if (!isZero(*it))
+            terms.push_back(*it);
+        auto z = bvnum(mkMPZ (0, exp->getFactory()), typeOf(exp));
+        return mkb<BADD>(terms, z);
       }
       if (isOpX<BMUL>(exp) && exp->arity() == 2)
       {
-        if (is_bvnum(exp->left()) && lexical_cast<cpp_int>(exp->left()->left()) == 1)
-          return exp->right();
-        if (is_bvnum(exp->right()) && lexical_cast<cpp_int>(exp->right()->left()) == 1)
-          return exp->left();
-      }
-      if (isOpX<BMUL>(exp) && exp->arity() == 2)
-      {
-        if (is_bvnum(exp->left()) && lexical_cast<cpp_int>(exp->left()->left()) == 0)
-          return exp->left();
-        if (is_bvnum(exp->right()) && lexical_cast<cpp_int>(exp->right()->left()) == 0)
-          return exp->right();
+	      ExprVector terms;
+        // to extend...
+        for (auto it = exp->args_begin (), end = exp->args_end (); it != end; ++it)
+          if (!isOne(*it))
+            terms.push_back(*it);
+        auto o = bvnum(mkMPZ (1, exp->getFactory()), typeOf(exp));
+	      return mkb<BMUL>(terms, o);
       }
       return exp;
     }
