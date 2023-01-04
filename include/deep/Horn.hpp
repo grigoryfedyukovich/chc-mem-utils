@@ -104,7 +104,7 @@ namespace ufo
 
     void shrinkLocVars()
     {
-      for (auto it = locVars.begin(); it != locVars.end();)
+      for (auto it = locVars.begin(); it != locVars.end(); )
         if (contains(body, *it)) ++it;
         else it = locVars.erase(it);
     }
@@ -144,6 +144,8 @@ namespace ufo
     map<Expr, ExprMap> origSrcVars;
     bool mems;
 
+    Expr alloc, mem, allocP, memP, off, offP, siz, sizP, aux, auxP; // set-enc
+
     // data structures for frontend-optimizations (lightweight. no SMT)
     map<int, set<pair<Expr, Expr>>> transit;
     map<int, pair<map<Expr, int>, map<Expr, int>>> transused;
@@ -166,7 +168,7 @@ namespace ufo
     void addVar(Expr decl, Expr var)
     {
       Expr varPr = cloneVar(var,
-         mkTerm<string> (lexical_cast<string>(var) + "'", m_efac));
+         mkTerm<string>(lexical_cast<string>(var) + "'", m_efac));
       addVar(decl, var, varPr);
     }
 
@@ -197,7 +199,7 @@ namespace ufo
     {
       ExprSet lin;
       getConj(chcs[i].body, lin);
-      for (auto it = lin.begin(); it != lin.end();)
+      for (auto it = lin.begin(); it != lin.end(); )
         if (contains(*it, var)) it = lin.erase(it);
           else ++it;
       chcs[i].body = conjoin(lin, m_efac);
@@ -221,14 +223,14 @@ namespace ufo
       return false;
     }
 
-    Expr getDeclByName(Expr a)
+    Expr getDeclByName (Expr a)
     {
       for (auto & d : decls)
         if (d->left() == a) return d;
       return NULL;
     }
 
-    bool addedDecl(Expr a)
+    bool addedDecl (Expr a)
     {
       return getDeclByName(a) != NULL;
     }
@@ -244,17 +246,17 @@ namespace ufo
           Expr arg = a->arg(i);
           if (!isOpX<INT_TY>(arg) && !isOpX<REAL_TY>(arg) &&
               !isOpX<BOOL_TY>(arg) && !isOpX<ARRAY_TY>(arg) &&
-              !isOpX<BVSORT> (arg) && !isOpX<AD_TY>(arg))
+              !isOpX<BVSORT>(arg) && !isOpX<AD_TY>(arg))
           {
             errs() << "Argument #" << i << " of " << a << " is not supported\n";
             exit(1);
           }
           while (true)
           {
-            Expr name = mkTerm<string> (varname + to_string(j), m_efac);
-            Expr var = fapp (constDecl (name, arg));
-            name = mkTerm<string> (lexical_cast<string>(name) + "'", m_efac);
-            Expr varPr = fapp (constDecl (name, arg));
+            Expr name = mkTerm<string>(varname + to_string(j), m_efac);
+            Expr var = fapp(constDecl(name, arg));
+            name = mkTerm<string>(lexical_cast<string>(name) + "'", m_efac);
+            Expr varPr = fapp(constDecl(name, arg));
             j++;
             if (find(origVrs.begin(), origVrs.end(), var) != origVrs.end())
               continue;
@@ -333,7 +335,7 @@ namespace ufo
     {
       if (debug > 0) outs () << "\nPARSING" << "\n=======\n";
       std::unique_ptr<ufo::ZFixedPoint <EZ3> > m_fp;
-      m_fp.reset (new ZFixedPoint<EZ3> (m_z3));
+      m_fp.reset (new ZFixedPoint<EZ3>(m_z3));
       ZFixedPoint<EZ3> &fp = *m_fp;
       fp.loadFPfromFile(smt);
       chcs.reserve(fp.m_rules.size());
@@ -363,14 +365,17 @@ namespace ufo
             r1 = r;
             for (auto & e : eqs)
             {
-              if (r1 != replaceAll(r1, e.first, e.second))
+              Expr r2 = replaceAll(r1, e.first, e.second);
+              if (r1 != r2)
+              {
                 outs () << "rewriting " << (e.first)->left()
                         << " -> " << (e.second)->left() << "\n";
-              r1 = replaceAll(r1, e.first, e.second);
+                r1 = r2;
+              }
             }
           }
           else
-             r1 = replaceAll(r, eqs);
+            r1 = replaceAll(r, eqs);
           if (r == r1) break;
           else r = r1;
         }
@@ -431,7 +436,7 @@ namespace ufo
           if (ind >= 0)
           {
             string name_str = supportedPredsAss[ind];
-            auto name_upd = mkTerm<string> (name_str, m_efac);
+            auto name_upd = mkTerm<string>(name_str, m_efac);
             head = replaceAll(head, name, name_upd);
             hr.body = mk<AND>(hr.body, mk<NEG>(head));
             head = mk<FALSE>(m_efac);
@@ -462,29 +467,29 @@ namespace ufo
                           << " CHCs and " << decls.size() << " declarations\n";
 
       Expr s = op::bv::bvsort (64, m_efac); // hardcode for now
-      Expr alloc, mem, allocP, memP, off, offP, siz, sizP, aux, auxP;
+
       if (setEnc)
       {
-        alloc = mkTerm<string> ("_alloc", m_efac);
-        mem = mkTerm<string> ("_mem", m_efac);
-        off = mkTerm<string> ("_off", m_efac);
-        siz = mkTerm<string> ("_siz", m_efac);
-        aux = mkTerm<string> ("_aux", m_efac);
-        alloc = mkConst(alloc, mk<ARRAY_TY> (s, s));
-        mem = mkConst(mem, mk<ARRAY_TY> (s, mk<ARRAY_TY> (s, s)));
-        off = mkConst(off, mk<ARRAY_TY> (s, s));
-        siz = mkConst(siz, mk<ARRAY_TY> (s, s));
-        aux = mkConst(aux, mk<ARRAY_TY> (s, s));
-        allocP = cloneVar(alloc, mkTerm<string> ("_alloc'", m_efac));
-        memP = cloneVar(mem, mkTerm<string> ("_mem'", m_efac));
-        offP = cloneVar(off, mkTerm<string> ("_off'", m_efac));
-        sizP = cloneVar(siz, mkTerm<string> ("_siz'", m_efac));
-        auxP = cloneVar(siz, mkTerm<string> ("_aux'", m_efac));
+        alloc = mkTerm<string>("_alloc", m_efac);
+        mem = mkTerm<string>("_mem", m_efac);
+        off = mkTerm<string>("_off", m_efac);
+        siz = mkTerm<string>("_siz", m_efac);
+        aux = mkTerm<string>("_aux", m_efac);
+        alloc = mkConst(alloc, mk<ARRAY_TY>(s, s));
+        mem = mkConst(mem, mk<ARRAY_TY>(s, mk<ARRAY_TY>(s, s)));
+        off = mkConst(off, mk<ARRAY_TY>(s, s));
+        siz = mkConst(siz, mk<ARRAY_TY>(s, s));
+        aux = mkConst(aux, mk<ARRAY_TY>(s, s));
+        allocP = cloneVar(alloc, mkTerm<string>("_alloc'", m_efac));
+        memP = cloneVar(mem, mkTerm<string>("_mem'", m_efac));
+        offP = cloneVar(off, mkTerm<string>("_off'", m_efac));
+        sizP = cloneVar(siz, mkTerm<string>("_siz'", m_efac));
+        auxP = cloneVar(siz, mkTerm<string>("_aux'", m_efac));
       }
 
       if (failDecl == NULL) failDecl = mk<FALSE>(m_efac);
       HornRuleExt & hrprev = *chcs.begin();
-      for (auto it = chcs.begin(); it != chcs.end();)
+      for (auto it = chcs.begin(); it != chcs.end(); )
       {
         HornRuleExt & hr = *it;
         bool nonempty = hr.splitBody();
@@ -510,7 +515,7 @@ namespace ufo
         Expr d = getDeclByName(hr.srcRelation);
         for (int i = 0; i < hr.nested.size(); i++)
         {
-          Expr newName = mkTerm<string> (name + "_" + to_string(i), m_efac);
+          Expr newName = mkTerm<string>(name + "_" + to_string(i), m_efac);
           HornRuleExt & hr2 = *it2;
           hr2.srcRelation = newName;
           decls.insert(replaceAll(d, d->left(), newName));
@@ -535,7 +540,6 @@ namespace ufo
 
       // set encoding is here
       ExprVector names;
-      vector<HornRuleExt> tmp;
 
       if (setEnc) resetVars();
       for (auto & hr : chcs)
@@ -544,18 +548,21 @@ namespace ufo
           outs () << "\n\n PROC " << hr.srcRelation << " -> " << hr.dstRelation << "\n";
 
         ExprSet rlin;
-        ExprSet checks;
         if (setEnc)
         {
+          auto dstVars = invVars[hr.srcRelation];
+
           for (auto & l : hr.lin)
           {
             if (debug >= 3)
               outs () << "\n------\n  orig: " << l << "\n";
             Expr rl = l;
-            if (!hr.isFact) rl = evalReplace(rl, hr.readVars,
-              alloc, mem, off, siz, aux, allocP, memP, offP, sizP, auxP, names);
-            rl = rewriteSet(rl, hr.writeVars,
-              alloc, mem, off, siz, aux, allocP, memP, offP, sizP, auxP, names);
+            if (!hr.isFact)
+              rl = evalReplace(rl, hr.readVars, dstVars, alloc, mem, off,
+                siz, aux, allocP, memP, offP, sizP, auxP, names);
+
+            rl = rewriteSet(rl, hr.writeVars, dstVars, alloc, mem, off,
+              siz, aux, allocP, memP, offP, sizP, auxP, names);
             rl = typeRepair(rl);
             rl = simplifyBool(rl);
             if (debug >= 3)
@@ -573,22 +580,8 @@ namespace ufo
               }
             }
 
-            if (!containsOp<AD_TY>(rl))
-            {
-              getConj(rl, rlin);
-
-              // memsafety checks generation
-              ExprSet selstors;
-              filter (rl, IsSelect (), inserter(selstors, selstors.begin()));
-              filter (rl, IsStore (), inserter(selstors, selstors.begin()));
-              for (auto & s : selstors)
-                if (isOpX<SELECT>(s->left()) && mem == s->left()->left())
-                  checks.insert(mk<BULT>(s->right(),
-                    mk<SELECT>(siz, mk<SELECT>(alloc, s->left()->right()))));
-            }
+            if (!containsOp<AD_TY>(rl)) getConj(rl, rlin);
           }
-
-          auto dstVars = invVars[hr.srcRelation];
 
           for (auto it = hr.readVars.begin(); it != hr.readVars.end(); ++it)
           {
@@ -624,21 +617,21 @@ namespace ufo
         }
         else
           hr.body = conjoin(hr.lin, m_efac);
+      }
 
-        // memsafety checks insertion
-        if (mems)
-        {
-          for (auto & c : checks)
-          {
-            tmp.push_back(hr);
-            tmp.back().isQuery = true;
-            tmp.back().isInductive = false;
-            tmp.back().isFact = false;
-            tmp.back().dstRelation = failDecl;
-            tmp.back().dstVars.clear();
-            tmp.back().body = mk<NEG>(c);
-          }
-        }
+      // find cycles in CHC structure
+      findCycles();
+
+      // move vars out of mem
+      if (setEnc) moveMemVars(s, names);
+
+      // memory safety checks generation
+      if (setEnc && mems) addMemSafetyChecks();
+
+      if (getQum() == 0)
+      {
+        errs () << "CHC system has no queries\n";
+        exit(0);
       }
 
       if (setEnc)
@@ -671,14 +664,6 @@ namespace ufo
           }
         }
 
-        for (auto & c : tmp) chcs.push_back(c);
-
-        if (getQum() == 0)
-        {
-          errs () << "CHC system has no queries\n";
-          exit(0);
-        }
-
         for (auto & hr : chcs)
         {
           hr.srcVars = invVars[hr.srcRelation];
@@ -692,7 +677,8 @@ namespace ufo
             for (auto & vp : hr.dstVars)
             {
               auto v = invVarsMap[hr.dstRelation][vp];
-              if (!contains(hr.writeVars, v)) lin.insert(mk<EQ>(vp, v));
+              if (!contains(hr.writeVars, v))
+                lin.insert(mk<EQ>(vp, v));
             }
           }
 
@@ -701,10 +687,6 @@ namespace ufo
 
         updateDecls();
       }
-      sz = chcs.size();
-      eliminateVacDecls(false);
-      if (debug > 0)
-        outs () << "Vacuity elimination (2): " << sz << " -> " << chcs.size() << "\n";
 
       for (auto & hr : chcs)
       {
@@ -712,7 +694,12 @@ namespace ufo
         hr.shrinkLocVars();
       }
 
-      findCycles();
+      sz = chcs.size();
+      eliminateVacDecls(false);
+      if (debug > 0)
+        outs () << "Vacuity elimination (2): " << sz << " -> " << chcs.size() << "\n";
+
+      findCycles(); // the second time, after some optims
 
       if (opt)
       {
@@ -775,6 +762,34 @@ namespace ufo
         updDecls.insert(mknary<FDECL>(args));
       }
       decls = updDecls;
+    }
+
+    void addMemSafetyChecks()
+    {
+      vector<HornRuleExt> tmp;
+      for (auto & hr : chcs)
+      {
+        ExprSet selstors, checks;
+        filter (hr.body, IsSelect (), inserter(selstors, selstors.begin()));
+        filter (hr.body, IsStore (), inserter(selstors, selstors.begin()));
+        for (auto & s : selstors)
+          if (isOpX<SELECT>(s->left()) && mem == s->left()->left())
+            checks.insert(mk<BULT>(s->right(),
+              mk<SELECT>(siz, mk<SELECT>(alloc, s->left()->right()))));
+
+        for (auto & c : checks)
+        {
+          // errs() << "ADD NEW Q\n";
+          tmp.push_back(hr);
+          tmp.back().isQuery = true;
+          tmp.back().isInductive = false;
+          tmp.back().isFact = false;
+          tmp.back().dstRelation = failDecl;
+          tmp.back().dstVars.clear();
+          tmp.back().body = mk<NEG>(c);
+        }
+      }
+      for (auto & c : tmp) chcs.push_back(c);
     }
 
     vector<int> simplCHCs;
@@ -1001,7 +1016,7 @@ namespace ufo
       vector<int> srcMax, dstMax;
       set<int> toEraseChcsTmp;
 
-      for (auto d = decls.begin(); d != decls.end();)
+      for (auto d = decls.begin(); d != decls.end(); )
       {
         vector<int> src, dst;
         for (int i = 0; i < chcs.size(); i++)
@@ -1107,12 +1122,11 @@ namespace ufo
           to_string(glob_ind++), m_efac);
         newVars.push_back(cloneVar(d->locVars[i], new_name));
       }
-
       mergedBody = mk<AND>(replaceAll(d->body, n->dstVars, newVars), mergedBody);
       n->locVars = newVars;
       n->locVars.insert(n->locVars.end(), s->locVars.begin(), s->locVars.end());
       auto tmp = simpleQE(mergedBody, n->locVars);
-      n->body = simplifyArr(tmp);
+      n->body = simplifyArr(simplifyBV(tmp));
       n->shrinkLocVars();
       n->dstVars = s->dstVars;
       n->isInductive = n->srcRelation == n->dstRelation;
@@ -1217,6 +1231,108 @@ namespace ufo
           return combineCHCs();
         }
       }
+    }
+
+    // helper for `moveMemVars`
+    bool findVarsSetEnc (vector<vector<int>>& traces, ExprVector& lh, Expr var)
+    {
+      for (auto & a : traces)
+      {
+        for (int i : a)
+        {
+          auto & hr = chcs[i];
+          auto it = find(lh.begin(), lh.end(), hr.dstRelation);
+          if (it != lh.end())
+          {
+            lh.erase(it);
+            if (findVarsSetEnc(cycles[hr.dstRelation], lh, var))
+              return true;
+          }
+
+          for (auto & c : hr.lin)
+            if (isOpX<EQ>(c) && c->left() == allocP &&
+                isOpX<STORE>(c->right()) && c->right()->last() == var)
+              return true;
+        }
+      }
+      return false;
+    }
+
+    void moveMemVars(Expr s, ExprVector& names)
+    {
+      ExprSet posvars;
+      for (auto & hr : chcs)
+      {
+        hr.lin.clear();
+        getConj(hr.body, hr.lin);
+        ExprVector se;
+        filter (hr.body, IsSelect (), inserter(se, se.begin()));
+        for (auto & s : se)
+          if (s->left() == mem && is_bvnum(s->right()))
+            posvars.insert(s->right());
+      }
+
+      for (auto it = posvars.begin(); it != posvars.end(); )
+      {
+        ExprVector loopheadsTmp = loopheads;
+        if (findVarsSetEnc(acyclic, loopheadsTmp, *it))
+          it = posvars.erase(it);
+        else
+          ++it;
+      }
+
+      Expr zer = bvnum(mkMPZ(0, m_efac), s);
+      for (auto it = posvars.begin(); it != posvars.end(); ++it)
+      {
+        int num = lexical_cast<int>((*it)->left());
+        Expr newVar = names[num - 1];
+        Expr newVarPr = cloneVar(newVar,
+           mkTerm<string>(lexical_cast<string>(newVar) + "'", m_efac));
+        for (auto & hr : chcs)
+        {
+          bool changed = false;
+          ExprVector toAdd;
+          for (auto it2 = hr.lin.begin(); it2 != hr.lin.end(); )
+          {
+            bool repled = false, varmoved = false;
+            auto b = *it2;
+            auto c = replaceAll(b, mk<SELECT>(mk<SELECT>(mem, *it), zer), newVar);
+            if (b != c) repled = true;
+            if (isOpX<EQ>(c))
+              if (memP == c->left() && isOpX<STORE>(c->right()))
+                if (mem == c->right()->left() && *it == c->right()->right())
+                {
+                  auto l = c->right()->last();
+                  if (isOpX<STORE>(l))
+                    if (isOpX<SELECT>(l->left()) && isZero(l->right()))
+                      if (mem == l->left()->left() && *it == l->left()->right())
+                      {
+                        auto extr = simpextract(typeOf(newVarPr), l->last());
+                        toAdd.push_back(mk<EQ>(newVarPr, extr));
+                        addVar(hr.dstRelation, newVar);
+                        hr.writeVars.insert(newVar);
+                        hr.writeVars.erase(mem);
+                        varmoved = true;
+                      }
+                }
+
+            if (repled || varmoved)
+              it2 = hr.lin.erase(it2);
+            else
+              ++it2;
+            if (repled && !varmoved)
+              toAdd.push_back(c);
+          }
+
+          if (!toAdd.empty())
+            hr.lin.insert(toAdd.begin(), toAdd.end());
+
+          hr.body = conjoin(hr.lin, m_efac);
+        }
+      }
+
+      // clean after it's done
+      for (auto & hr : chcs) hr.lin.clear();
     }
 
     // front-end optimizations: helper methods for `eliminateTransitVars`
@@ -1521,13 +1637,16 @@ namespace ufo
 
     void findCycles()
     {
+      ExprVector endRels;
       outgs.clear(); acyclic.clear(); cycles.clear(); allCHCs.clear();
       prefixes.clear(); seqPoints.clear(); wtoCHCs.clear();
       for (int i = 0; i < chcs.size(); i++)
+      {
         outgs[chcs[i].srcRelation].push_back(i);
+        if (chcs[i].isQuery) unique_push_back(chcs[i].dstRelation, endRels);
+      }
 
       ExprVector av;
-      ExprVector endRels = {failDecl};
       for (auto & d : decls)
         if (outgs[d->left()].empty())
           endRels.push_back(d->left());
@@ -1565,7 +1684,7 @@ namespace ufo
       if (debug >= 2) outs () << "\nfindCycles:  " << src << " => " << dst << "\n";
       vector<vector<int>> nonCycleTraces;
       ExprVector highLevelRels;
-      for (int i = 1; i < chcs.size(); i++)
+      for (int i = 1; i <= chcs.size(); i++)
       {
         if (debug >= 2)
         {

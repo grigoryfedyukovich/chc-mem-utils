@@ -82,25 +82,27 @@ namespace ufo
     return false;
   }
 
-  inline static Expr ssext (Expr v, Expr bvs)
+  inline static Expr simpsext (Expr v, Expr ty)
   {
     if (isOpX<BSEXT>(v))
     {
-      assert(width(v->last()) <= width(bvs));
-      return ssext(v->left(), bvs);
+      assert(width(v->last()) <= width(ty));
+      return simpsext(v->left(), ty);
     }
-    return mk<BSEXT> (v, bvs);
+    if (is_bvnum(v))
+      return bvnum(v->left(), ty);
+    return mk<BSEXT> (v, ty);
   }
 
   inline static void getBAddTerm (Expr a, ExprVector &ptrms, ExprVector &ntrms)
   {
     if (isOpX<BSEXT>(a))
     {
-      Expr bvs = a->last();
+      Expr ty = a->last();
       ExprVector p, n;
       getBAddTerm(a->left(), p, n);
-      for (auto & t : p) ptrms.push_back(ssext(t, bvs));
-      for (auto & t : n) ntrms.push_back(ssext(t, bvs));
+      for (auto & t : p) ptrms.push_back(simpsext(t, ty));
+      for (auto & t : n) ntrms.push_back(simpsext(t, ty));
     }
     else if (isOpX<BADD>(a))
     {
@@ -255,6 +257,22 @@ namespace ufo
     return reBuildCmp(e, mkb<BADD>(ptrms, z), mkb<BADD>(ntrms, z));
   }
 
+  Expr simpextract(Expr ty, Expr exp)
+  {
+    int w = width(ty);
+    int w1 = width(typeOf(exp));
+    assert(w1 >= w);
+    if (w1 == w) return exp;
+
+    if (isOpX<BEXTRACT>(exp)) return simpextract(ty, exp->last());
+    if (isOpX<BSEXT>(exp) || isOpX<BZEXT>(exp))
+    {
+      if (width(typeOf(exp->left())) >= w)
+       return simpextract(ty, exp->left());
+    }
+    return bv::extract (w-1, 0, exp);
+  }
+
   struct SimplifyBVExpr
   {
     SimplifyBVExpr () {};
@@ -300,11 +318,12 @@ namespace ufo
           isOpX<BUGT>(exp) || isOpX<BSGT>(exp) ||
           isOpX<BUGE>(exp) || isOpX<BSGE>(exp))
       {
-        if ((isOpX<BSEXT>(exp->left()) && isOpX<BSEXT>(exp->right())) ||
-            (isOpX<BZEXT>(exp->left()) && isOpX<BZEXT>(exp->right())))
-          if (width(typeOf(exp->left()->left())) ==
-              width(typeOf(exp->right()->left())))
-              return reBuildCmp(exp, exp->left()->left(), exp->right()->left());
+        Expr l = exp->left(), r = exp->right();
+        if ((isOpX<BSEXT>(l) && isOpX<BSEXT>(r)) ||
+            (isOpX<BZEXT>(l)) && isOpX<BZEXT>(r))
+          if (width(typeOf(l->left())) ==
+              width(typeOf(r->left())))
+              return reBuildCmp(exp, l->left(), r->left());
       }
       if (!is_bvnum(exp) && isZero(exp))
       {
@@ -312,14 +331,11 @@ namespace ufo
       }
       if (isOpX<BEXTRACT>(exp))
       {
-        if (isOpX<BEXTRACT>(exp->last()))
-          // to extend
-          if (exp->left()  == exp->last()->left() &&
-              exp->right() == exp->last()->right())
-              return exp->last();
-
-        if (width(typeOf(exp->last())) == high(exp) - low(exp) + 1)
-          return exp->last();
+        return simpextract(typeOf(exp), exp->last());
+      }
+      else if (isOpX<BSEXT>(exp))
+      {
+        return simpsext(exp->left(), exp->last());
       }
       if (isOpX<BADD>(exp) && exp->arity() == 2)
       {

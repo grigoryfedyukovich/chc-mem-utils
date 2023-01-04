@@ -354,20 +354,6 @@ namespace ufo
     }
   }
 
-  inline static void getChainOfStores (Expr a, ExprSet &stores)
-  {
-    if (isOpX<STORE>(a))
-    {
-      stores.insert(a);
-      getChainOfStores(a->left(), stores);
-    }
-    else if (isOpX<ITE>(a))
-    {
-      for (unsigned i = 1; i <= 2; i++)
-        getChainOfStores(a->arg(i), stores);
-    }
-  }
-
   inline static void getMultOps (Expr a, ExprVector &ops)
   {
     if (isOpX<MULT>(a)){
@@ -1437,8 +1423,23 @@ namespace ufo
     }
   };
 
+
   static Expr simplifyArr (Expr exp);
   static bool evalSelectEq(Expr e);
+
+  Expr duplChainOfStores(Expr exp, Expr val)
+  {
+    if (isOpX<STORE>(exp))
+    {
+      if (exp->right() == val)
+      {
+        return exp->left();
+      }
+      Expr ret = duplChainOfStores(exp->left(), val);
+      return simplifyArr(mk<STORE>(ret, exp->right(), exp->last()));
+    }
+    else return exp;
+  }
 
   struct SimplifyArrExpr
   {
@@ -1449,64 +1450,47 @@ namespace ufo
       // GF: to enhance
 
       if (isOpX<STORE>(exp))
-      {
-        ExprSet stores;
-        getChainOfStores(exp->left(), stores);
-        for (auto s : stores)
-          if (exp->right() == s->right()) // cell overwritten
-            exp = replaceAll(exp, s, s->left());
-      }
+        exp = mk<STORE>(duplChainOfStores(exp->left(), exp->right()),
+          exp->right(), exp->last());
 
       if (isOpX<SELECT>(exp))
       {
-        if (isOpX<STORE>(exp->left()) && exp->right() == exp->left()->right())
+        Expr s = exp->left(), c = exp->right();
+        if (isOpX<STORE>(s) && c == s->right())
+          return s->last();
+
+        if (isOpX<STORE>(s))
         {
-          return exp->left()->last();
-        }
-        else if (isOpX<STORE>(exp->left()))
-        {
-          Expr a = exp->right();
-          Expr b = exp->left()->right();
-          if (isValue(a) && isValue(b) && a != b)
-            return mk<SELECT>(exp->left()->left(), exp->right());
-        }
-        if (isOpX<STORE>(exp->left()) && // exp->right() != exp->left()->right() &&
-            bind::typeOf(exp->left())->last() == mk<BOOL_TY> (exp->efac ()))
-        {
-          return mk<OR>(
-            mk<AND>(mk<EQ>(exp->right(), exp->left()->right()),
-                    exp->left()->last()),
-            mk<AND>(mk<NEQ>(exp->right(), exp->left()->right()),
-                    mk<SELECT>(exp->left()->left(), exp->last())));
+          Expr b = s->right();
+          if (isValue(c) && isValue(b) && c != b)
+            return mk<SELECT>(s->left(), c);
+          if (isOpX<STORE>(s) && // c != s->right() &&
+              bind::typeOf(s)->last() == mk<BOOL_TY> (exp->efac ()))
+            return mk<OR>(
+              mk<AND>(mk<EQ>(c, b), s->last()),
+              mk<AND>(mk<NEQ>(c, b), mk<SELECT>(s->left(), exp->last())));
         }
       }
 
       if (isOpX<EQ>(exp))
       {
+        Expr l = exp->left(), r = exp->right();
         if (evalSelectEq(exp))
           return mk<TRUE>(exp->getFactory());
-        if (isOpX<STORE>(exp->left()) && exp->right() == exp->left()->left())
-        {
-          return simplifyArr(mk<EQ>(mk<SELECT>(exp->right(), exp->left()->right()), exp->left()->last()));
-        }
-        if (isOpX<STORE>(exp->right()) && exp->left() == exp->right()->left())
-        {
-          return simplifyArr(mk<EQ>(mk<SELECT>(exp->left(), exp->right()->right()), exp->right()->last()));
-        }
-        if (isOpX<SELECT>(exp->left()) && isOpX<STORE>(exp->left()->left()) &&
-            exp->right() == exp->left()->left()->last())
-        {
+        if (isOpX<STORE>(l) && r == l->left())
+          return simplifyArr(mk<EQ>(mk<SELECT>(r, l->right()), l->last()));
+        if (isOpX<STORE>(r) && l == r->left())
+          return simplifyArr(mk<EQ>(mk<SELECT>(l, r->right()), r->last()));
+        if (isOpX<SELECT>(l) && isOpX<STORE>(l->left()) &&
+            r == l->left()->last())
           return mk<OR>(
-            mk<EQ>(exp->left()->right(), exp->left()->left()->right()),
-            mk<EQ>(mk<SELECT>(exp->left()->left()->left(), exp->left()->right()), exp->right()));
-        }
-        if (isOpX<SELECT>(exp->right()) && isOpX<STORE>(exp->right()->left()) &&
-            exp->left() == exp->right()->left()->last())
-        {
+            mk<EQ>(l->right(), l->left()->right()),
+            mk<EQ>(mk<SELECT>(l->left()->left(), l->right()), r));
+        if (isOpX<SELECT>(r) && isOpX<STORE>(r->left()) &&
+            l == r->left()->last())
           return mk<OR>(
-            mk<EQ>(exp->right()->right(), exp->right()->left()->right()),
-            mk<EQ>(mk<SELECT>(exp->right()->left()->left(), exp->right()->right()), exp->left()));
-        }
+            mk<EQ>(r->right(), r->left()->right()),
+            mk<EQ>(mk<SELECT>(r->left()->left(), r->right()), l));
       }
       return exp;
     }
@@ -4859,13 +4843,15 @@ namespace ufo
     }
     else if (isOpX<AND>(exp))
     {
-      outs () << string(inden, ' ') << "[&&\n";
       getConj(exp, flas);
+      if (!flas.empty())
+        outs () << string(inden, ' ') << "[&&\n";
     }
     else if (isOpX<OR>(exp))
     {
-      outs () << string(inden, ' ') << "[||\n";
       getDisj(exp, flas);
+      if (!flas.empty())
+        outs () << string(inden, ' ') << "[||\n";
     }
     else if (isOpX<NEG>(exp))
     {
@@ -4893,15 +4879,16 @@ namespace ufo
     }
     else if (isOpX<IMPL>(exp))
     {
-      outs () << string(inden, ' ') << "[";
-      pprint(exp->left(), inden);
-      outs () << string(inden + 2, ' ') << "=>\n";
-      pprint(exp->right(), inden + 4);
+      outs () << string(inden, ' ') << "[\n";
+      pprint(exp->left(), inden + 2);
+      outs () << string(inden + 4, ' ') << "=>\n";
+      pprint(exp->right(), inden + 2);
       outs () << string(inden, ' ') << "]";
       if (upper) outs() << "\n";
       return;
     }
-    if (flas.empty()) outs () << string(inden, ' ') << exp;
+    if (flas.empty())
+      outs () << string(inden, ' ') << exp;
     else
     {
       pprint(flas, inden + 2);
