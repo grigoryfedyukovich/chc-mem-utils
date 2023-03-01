@@ -1377,16 +1377,16 @@ namespace ufo
           met |= (hr.dstRelation == decl);
           if (!met) continue;
 
+          if (contains(loopheads, hr.dstRelation))
+            if (!exploreLoops(hr.dstRelation, var))
+              return false;
+
           if (hr.dstRelation == decl &&
             (contains(singused[i], var)) || contains(notused[i], var))
           {
             use = contains(singused[i], var);
             continue;
           }
-
-          if (contains(loopheads, hr.dstRelation))
-            if (!exploreLoops(hr.dstRelation, var))
-              return false;
 
           int b = 0;
           for (auto & t : transit[i])
