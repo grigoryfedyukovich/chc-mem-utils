@@ -796,6 +796,7 @@ namespace ufo
   {
     ExprFactory &efac = fla->getFactory();
     SMTUtils u(efac);
+    fla = simpleQE(fla, vars);
     ExprSet complex;
     findComplexNumerics(fla, complex);
     ExprSet varsCond;
@@ -828,20 +829,12 @@ namespace ufo
     return eliminateQuantifiers(fla, varsSet, false, true, weaken);
   }
 
-  inline static Expr keepQuantifiersReplWeak(Expr fla, ExprVector& vars)
+  inline static Expr keepQuantifiersRepl(Expr fla, ExprVector& vars, bool weak = false)
   {
     ExprSet varsSet;
     filter (fla, bind::IsConst (), inserter(varsSet, varsSet.begin()));
     minusSets(varsSet, vars);
-    return eliminateQuantifiersRepl(fla, varsSet, true);
-  }
-
-  inline static Expr keepQuantifiersRepl(Expr fla, ExprVector& vars)
-  {
-    ExprSet varsSet;
-    filter (fla, bind::IsConst (), inserter(varsSet, varsSet.begin()));
-    minusSets(varsSet, vars);
-    return eliminateQuantifiersRepl(fla, varsSet);
+    return eliminateQuantifiersRepl(fla, varsSet, weak);
   }
 
   inline static Expr abduce (Expr goal, Expr assm)

@@ -521,6 +521,43 @@ namespace ufo
       return upd;
     }
 
+    void getAliasCombs (Expr body, Expr rel, Expr allocVar,
+        vector<ExprMap> & aliasCombs)
+    {
+      ExprSet se;
+      filter (body, IsSelect (), inserter(se, se.begin()));
+      for (auto & s : se)
+      {
+        if (s->left() != allocVar) continue;
+
+        ExprSet regions;
+        if (is_bvnum(s->last()))
+          regions = aliasesRev[rel][s->last()];
+        else
+          for (auto & val : allocVals[rel])
+            if (lexical_cast<string>(toMpz(val)) != "0")
+              regions.insert(val);
+
+        if (aliasCombs.empty())
+          for (auto & a : regions)
+            aliasCombs.push_back({{s, a}});
+        else
+        {
+          vector<ExprMap> aliasCombsTmp = aliasCombs;
+          aliasCombs.clear();
+          for (auto & a : regions)
+          {
+            for (auto & m : aliasCombsTmp)
+            {
+              assert (m[s] == NULL);
+              aliasCombs.push_back(m);
+              aliasCombs.back()[s] = a;
+            }
+          }
+        }
+      }
+    }
+
     // assumes small-block encoding:
     //  - fact has no memory manipulation, and actually is empty
     //  - every CHC has at most one operation (either for mem, alloca, or non-mem)
@@ -568,109 +605,52 @@ namespace ufo
             r.dstVars.push_back(v.second);
           continue;
         }
+        body = fixpointRewrite(body,
+          [](Expr e){return simplifyArr(simplifyBV(e));});
+
         if (printLog >= 4) pprint(body, 3);
-        map<Expr, ExprSet> & ali = r.isFact ? aliases[r.dstRelation] :
-                                              aliases[r.srcRelation];
+
         Expr rel = r.srcRelation;
-        Expr alloSrc = r.srcVars[allocMap[rel]];
-        Expr memVar = r.srcVars[memMap[r.srcRelation]];
+        map<Expr, ExprSet> & ali = aliases[r.isFact ? r.dstRelation : rel];
+        Expr memVar = r.srcVars[memMap[rel]];
 
         // step 0: find alloc-selects, replace them by respective vals
         //                      (need to be an invar)
         vector<ExprMap> aliasCombs;
-        ExprVector se;
-        ExprSet seSimp;
-        filter (body, IsSelect (), inserter(se, se.begin()));
-        for (auto s : se)
-        {
-          Expr sSimp = simplifyArr(simplifyBV(s));
-          r.body = replaceAll(r.body, s, sSimp);
-          seSimp.insert(sSimp);
-        }
-
-        ExprSet considered;
-        for (auto sit = seSimp.rbegin(); sit != seSimp.rend(); ++sit)
-        {
-          auto s = *sit;
-
-          if (s->left() == alloSrc)
-          {
-            ExprSet tmp;
-            if (is_bvnum(s->last()))
-            {
-              tmp = aliasesRev[rel][s->last()];
-            }
-            else
-            {
-              for (auto & val : allocVals[rel])
-                if (lexical_cast<string>(toMpz(val)) != "0")
-                  tmp.insert(val);
-            }
-
-            if (aliasCombs.empty())
-            {
-              for (auto & a : tmp)
-              {
-                ExprMap tmp;
-                tmp[s] = a;
-                aliasCombs.push_back(tmp);
-                if (printLog >= 2)
-                  outs () << "alias:  " << s->last() << " -> " << a << "\n";
-              }
-            }
-            else
-            {
-              vector<ExprMap> aliasCombsTmp = aliasCombs;
-              aliasCombs.clear();
-              for (auto & a : tmp)
-              {
-                for (auto & m : aliasCombsTmp)
-                {
-                  ExprMap tmp = m;
-                  if (printLog >= 2)
-                    outs () << "alias:  " << s->last() << " -> " << a << "\n";
-                  assert (m[s] == NULL);
-                  tmp[s] = a;
-                  aliasCombs.push_back(tmp);
-                }
-              }
-            }
-          }
-        }
+        getAliasCombs(body, rel, r.srcVars[allocMap[rel]], aliasCombs);
 
         ExprVector newBodies;
-        int it = 0;
-
-        body = simplifyArr(simplifyBV(body));
         for (auto & m : aliasCombs)
         {
-          Expr newBody = body;
           ExprVector newConstrs;
           ExprMap combEqs;
           for (auto & v : m)
-          {
-            auto tmp = replaceAll(v.first, combEqs);
-            combEqs[tmp] = v.second;
-          }
+            combEqs[replaceAll(v.first, combEqs)] = v.second;
+
           Expr combEqss = conjoin(combEqs, m_efac);
           if (printLog >= 2)
           {
-            outs () << "  combination # " << (it++) << ":\n";
+            outs () << "  combination #" << newBodies.size()
+                               << " / " << aliasCombs.size() <<":\n";
             pprint(combEqss, 4);
           }
 
-          newBody = replaceAll(newBody, m);
+          Expr newBody = replaceAll(body, m);
 
           ExprSet arrVarsMached;
           for (auto & al : ali)
           {
-            Expr num = al.first;
-            Expr replTo = arrVars[rel][num];
-            if (printLog >= 2) outs () << "rewriting " << mk<SELECT>(memVar, num)
-                                       << " with " << replTo << "\n";
-            newBody = replaceAll(newBody, mk<SELECT>(memVar, num), replTo);
-            combEqss = replaceAll(combEqss, mk<SELECT>(memVar, num), replTo);
+            Expr arrAccs = arrVars[rel][al.first];
+            Expr memAccs = mk<SELECT>(memVar, al.first);
+            if (printLog >= 2)
+              outs () << "rewriting " << memAccs << " with " << arrAccs << "\n";
+            newBody = replaceAll(newBody, memAccs, arrAccs);
+            combEqss = replaceAll(combEqss, memAccs, arrAccs);
           }
+
+          newBody = fixpointRewrite(newBody,
+            [](Expr e){return simplifyArr(simplifyBV(e));});
+
           if (printLog >= 2)
           {
             outs () << "  body after replacement:\n";
@@ -683,7 +663,6 @@ namespace ufo
           Expr newDef = NULL;
           for (auto s : st)   // find at most one new array update
           {
-            s = simplifyArr(simplifyBV(s));
             if (!(typeOf(s->left()) == memTy && IsConst() (s->left()))) continue;
             Expr num = s->right();
             assert(newDef == NULL && "possibly, not a small-step encoding");
@@ -735,7 +714,7 @@ namespace ufo
         {
           // binding src/dst vars
           ExprSet newBody;
-          getConj(r.body, newBody);
+          getConj(body, newBody);
           for (auto & a : arrVars[r.dstRelation])
           {
             Expr num = a.first;
@@ -921,6 +900,11 @@ namespace ufo
           }
         }
 
+        b = fixpointRewrite(b,
+          [](Expr e){return simplifyArr(
+                            simpConstArr(
+                            simplifyBV(
+                            simplifyBool(e))));});
         b = simpleQE(b, c.locVars);
         b = factor(b, norm); // to elaborate on
 
@@ -961,7 +945,7 @@ namespace ufo
       b = rewriteSelectStore(b);
       b = simplifyBV(b);
       b = simplifyBool(b);
-      b = keepQuantifiersReplWeak(b, varsp);
+      b = keepQuantifiersRepl(b, varsp, true);
       ExprSet cnjs;
       getConj(factor(b, prj), cnjs);
       if (isOpX<EQ>(a) && isArray(a->left())) cnjs.insert(a); // for arrays and further simplification

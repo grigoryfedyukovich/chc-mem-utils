@@ -954,6 +954,15 @@ namespace ufo
     return mk<NEG>(fla);
   }
 
+  inline static Expr fixpointRewrite(Expr e,
+                            function<Expr(Expr)> rewr, int threshold = 100)
+  {
+    if (threshold == 0) return e;
+    auto res = rewr(e);
+    if (res == e) return res;
+    return fixpointRewrite(res, rewr, threshold - 1);
+  }
+
   inline static cpp_int separateConst(ExprVector& plsOps)
   {
     cpp_int c = 0;
@@ -1425,7 +1434,6 @@ namespace ufo
 
 
   static Expr simplifyArr (Expr exp);
-  static bool evalSelectEq(Expr e);
 
   Expr duplChainOfStores(Expr exp, Expr val)
   {
@@ -1441,6 +1449,34 @@ namespace ufo
     else return exp;
   }
 
+  Expr simpConstArr(Expr exp)
+  {
+    ExprSet cnjs;
+    getConj(exp, cnjs);
+    Expr l = NULL, r = NULL;
+    for (auto & a : cnjs)
+    {
+      if (!isOpX<EQ>(a)) continue;
+      if (isOpX<CONST_ARRAY>(a->left()))
+      {
+        l = a->left();
+        r = a->right();
+        break;
+      }
+      else if (isOpX<CONST_ARRAY>(a->right()))
+      {
+        r = a->left();
+        l = a->right();
+        break;
+      }
+    }
+    if (r == NULL)
+      return exp;
+    else
+      return replaceAll(exp, r, l);
+  }
+
+  static bool evalSelectEq(Expr e);
   struct SimplifyArrExpr
   {
     SimplifyArrExpr () {};
@@ -1456,6 +1492,8 @@ namespace ufo
       if (isOpX<SELECT>(exp))
       {
         Expr s = exp->left(), c = exp->right();
+        if (isOpX<CONST_ARRAY>(s)) return s->right();
+
         if (isOpX<STORE>(s) && c == s->right())
           return s->last();
 
@@ -1464,11 +1502,10 @@ namespace ufo
           Expr b = s->right();
           if (isValue(c) && isValue(b) && c != b)
             return mk<SELECT>(s->left(), c);
-          if (isOpX<STORE>(s) && // c != s->right() &&
-              bind::typeOf(s)->last() == mk<BOOL_TY> (exp->efac ()))
+          if (isOpX<STORE>(s) && isOpX<BOOL_TY>(typeOf(s)->last()))
             return mk<OR>(
               mk<AND>(mk<EQ>(c, b), s->last()),
-              mk<AND>(mk<NEQ>(c, b), mk<SELECT>(s->left(), exp->last())));
+              mk<AND>(mk<NEQ>(c, b), mk<SELECT>(s->left(), c)));
         }
       }
 
@@ -1498,7 +1535,6 @@ namespace ufo
 
   inline static Expr simplifyArr (Expr exp)
   {
-    if (containsOp<FORALL>(exp) || containsOp<EXISTS>(exp)) return exp;
     RW<SimplifyArrExpr> rw(new SimplifyArrExpr());
     return dagVisit (rw, exp);
   }
