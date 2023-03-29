@@ -32,6 +32,19 @@ namespace ufo
     map<int, ExprVector> candidatesNext;
     map<int, set<pair<int, int>>> stableVars;
 
+    virtual tribool wrapSMT(HornRuleExt& hr, ExprSet& exprs, ExprSet& negged)
+    {
+      if (negged.empty()) return false;
+      ExprMap repl;
+      for (auto & t : ruleManager.transit[hr.id])
+        repl[t.second] = t.first;
+
+      ExprSet negged2;
+      for (auto n : negged) negged2.insert(replaceAll(n, repl));
+      exprs.insert(disjoin(negged2, m_efac));
+      return u.isSat(exprs);
+    }
+
     bool multiHoudini (vector<HornRuleExt*> worklist, bool recur = true,
       bool fastExit = false)
     {
@@ -98,17 +111,21 @@ namespace ufo
 
     void computeStableVars()
     {
+      ruleManager.prepTransitVars();
       for (int i = 0; i < ruleManager.chcs.size(); i++)
       {
         auto & r = ruleManager.chcs[i];
 
         // currently, only alloc
-        if (!r.isFact && !r.isQuery)
-          if (u.implies(r.body, mk<EQ>(
-            r.srcVars[allocMap[r.srcRelation]],
-            r.dstVars[allocMap[r.dstRelation]])))
-              stableVars[i].insert(
-                {allocMap[r.dstRelation], allocMap[r.srcRelation]});
+        if (r.isFact || r.isQuery) continue;
+
+        auto a = r.srcVars[allocMap[r.srcRelation]];
+        auto b = r.dstVars[allocMap[r.dstRelation]];
+
+        for (auto & t : ruleManager.transit[r.id])
+          if (t.first == a && t.second == b)
+            stableVars[i].insert(
+              {allocMap[r.dstRelation], allocMap[r.srcRelation]});
       }
     }
 
@@ -608,7 +625,7 @@ namespace ufo
         body = fixpointRewrite(body,
           [](Expr e){return simplifyArr(simplifyBV(e));});
 
-        if (printLog >= 4) pprint(body, 3);
+        if (printLog >= 3) pprint(body, 3);
 
         Expr rel = r.srcRelation;
         map<Expr, ExprSet> & ali = aliases[r.isFact ? r.dstRelation : rel];
@@ -619,7 +636,12 @@ namespace ufo
         vector<ExprMap> aliasCombs;
         getAliasCombs(body, rel, r.srcVars[allocMap[rel]], aliasCombs);
 
-        ExprVector newBodies;
+        Expr memBody, memfBody;
+        memBody = body;
+        memfBody = mk<TRUE>(m_efac);// TODO: find some common part and move here
+
+        ExprVector allCombEqs;
+        ExprVector newBodies = {memfBody};
         for (auto & m : aliasCombs)
         {
           ExprVector newConstrs;
@@ -635,7 +657,7 @@ namespace ufo
             pprint(combEqss, 4);
           }
 
-          Expr newBody = replaceAll(body, m);
+          Expr newBody = replaceAll(memBody, m);
 
           ExprSet arrVarsMached;
           for (auto & al : ali)
@@ -707,9 +729,16 @@ namespace ufo
           else
             newConstrs.push_back(replaceAll(newBody, memUpd, mk<TRUE>(m_efac)));
 
-          newBody = mk<IMPL>(combEqss, conjoin(newConstrs, m_efac));
-          newBodies.push_back(newBody);
+          if (!isOpX<TRUE>(newBody))
+          {
+            newBody = mk<IMPL>(combEqss, conjoin(newConstrs, m_efac));
+            newBodies.push_back(newBody);
+          }
+          allCombEqs.push_back(combEqss);
         }
+
+        newBodies.push_back(distribDisjoin(allCombEqs, m_efac));
+
         if (aliasCombs.empty())
         {
           // binding src/dst vars
@@ -900,14 +929,14 @@ namespace ufo
           }
         }
 
+        b = simpleQE(b, c.locVars);
         b = fixpointRewrite(b,
           [](Expr e){return simplifyArr(
                             simpConstArr(
                             simplifyBV(
                             simplifyBool(e))));});
-        b = simpleQE(b, c.locVars);
-        b = factor(b, norm); // to elaborate on
 
+        b = factor(b, norm); // to elaborate on
         c.body = b;
 
         if (printLog >= 3)
@@ -936,6 +965,8 @@ namespace ufo
           pprint(cnj, 2);
         }
       }
+
+      ruleManager.prepTransitVars();
     }
 
     void preproAdder(Expr a, ExprVector& vars, ExprVector& varsp,
@@ -1775,27 +1806,32 @@ namespace ufo
     tribool invSyn(int ser, int b = 0)
     {
       candidates.clear();
+
       if (b == 0)
       {
-        for(auto & c : ruleManager.chcs)
+        for (auto & d : ruleManager.decls)
         {
-          if (!c.isQuery)
+          int invNum = getVarIndex(d->left(), decls);
+          auto a = allocMap[d->left()];
+          auto o = offMap[d->left()];
+          auto av = ruleManager.invVars[d->left()][a];
+          auto ov = ruleManager.invVars[d->left()][o];
+          auto ty = typeOf(ov)->last();
+          for (auto & al : aliasesRev[d->left()])
           {
-            auto a = allocMap[c.dstRelation];
-            auto av = ruleManager.invVars[c.dstRelation][a];
-            auto avp = ruleManager.invVarsPrime[c.dstRelation][a];
-            u.isSat(c.body);
-            auto mdl = u.getModel(avp);
-            if (avp != mdl)
-            {
-              auto cand = mk<EQ>(av, mdl);
-              addToCandidates(getVarIndex(c.dstRelation, decls), cand, 100);
+            ExprSet tmp;
 
-              ExprSet tmp;
-              getConj(u.removeITE(rewriteSelectStore(cand)), tmp);
-              for (auto & a : tmp)
-                addToCandidates(getVarIndex(c.dstRelation, decls), a, 100);
+            for (auto & a : al.second)
+            {
+              tmp.insert(mk<EQ>(mk<SELECT>(av, al.first), a));
+              addToCandidates(invNum, mk<EQ>(mk<SELECT>(ov, al.first),
+                  bvnum(mkMPZ(0, m_efac), ty)), 105);
             }
+
+            ExprSet ncands;
+            distribDisjoin(tmp, ncands, m_efac);
+            for (auto & a : ncands)
+              addToCandidates(invNum, a, 100);
           }
         }
       }
@@ -1933,20 +1969,25 @@ namespace ufo
 
     void simplifyCHCstruct()
     {
+      ruleManager.prepTransitVars();
       vector<int> simplCHCs;
       for (int j = 0; j < ruleManager.chcs.size(); j++)
       {
         auto & c = ruleManager.chcs[j];
-        if (c.isFact){
-          simplCHCs.push_back(j);
-          continue;
+        if (c.isFact) simplCHCs.push_back(j);
+        if (c.isFact || c.isQuery) continue;
+        Expr a = c.srcVars[memMap[c.srcRelation]];
+        Expr b = c.dstVars[memMap[c.dstRelation]];
+        bool broke = false;
+        for (auto & t : ruleManager.transit[c.id])
+        {
+          if (t.first == a && t.second == b)
+          {
+            broke = true;
+            break;
+          }
         }
-        if (c.isQuery) {
-          continue;
-        }
-        Expr srcVar = ruleManager.invVars[c.srcRelation][memMap[c.srcRelation]];
-        Expr dstVar = ruleManager.invVarsPrime[c.dstRelation][memMap[c.dstRelation]];
-        if (!u.implies(c.body, mk<EQ>(srcVar, dstVar))) simplCHCs.push_back(j);
+        if (!broke) simplCHCs.push_back(j);
       }
       ruleManager.doElim(false, simplCHCs);
     }

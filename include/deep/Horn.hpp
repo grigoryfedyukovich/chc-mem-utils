@@ -13,6 +13,8 @@ namespace ufo
 {
   struct HornRuleExt
   {
+    int id;
+
     ExprVector srcVars;
     ExprVector dstVars;
     ExprVector locVars;
@@ -563,8 +565,7 @@ namespace ufo
 
             rl = rewriteSet(rl, hr.writeVars, dstVars, alloc, mem, off,
               siz, aux, allocP, memP, offP, sizP, auxP, names);
-            rl = typeRepair(rl);
-            rl = simplifyBool(rl);
+
             if (debug >= 3)
             {
               outs () << "  conv: " << rl << "\n";
@@ -624,6 +625,8 @@ namespace ufo
 
       // move vars out of mem
       if (setEnc) moveMemVars(s, names);
+
+      if (setEnc) for (auto & r : chcs) r.body = typeRepair(r.body);
 
       // memory safety checks generation
       if (setEnc && mems) addMemSafetyChecks();
@@ -1126,7 +1129,11 @@ namespace ufo
       n->locVars = newVars;
       n->locVars.insert(n->locVars.end(), s->locVars.begin(), s->locVars.end());
       auto tmp = simpleQE(mergedBody, n->locVars);
-      n->body = simplifyArr(simplifyBV(tmp));
+      n->body = fixpointRewrite(tmp,
+        [](Expr e){ return
+          simplifyArr(
+          simpConstArr(
+          simplifyBV(e)));});
       n->shrinkLocVars();
       n->dstVars = s->dstVars;
       n->isInductive = n->srcRelation == n->dstRelation;
@@ -1225,7 +1232,11 @@ namespace ufo
             s.locVars.insert(s.locVars.end(), h.locVars.begin(), h.locVars.end());
             if (*it != i) toEraseChcs.insert(*it);
           }
-          s.body = distribDisjoin(all, m_efac);
+          s.body = fixpointRewrite(distribDisjoin(all, m_efac),
+            [](Expr e){ return simplifyBool(
+                simplifyArr(
+                simpConstArr(
+                simplifyBV(e))));});
           chcsToCheck1.insert(i);
           chcsToCheck2.insert(i);
           return combineCHCs();
@@ -1483,11 +1494,15 @@ namespace ufo
       }
     }
 
-    void eliminateTransitVars()
+    void prepTransitVars(bool onlyTrans = true)
     {
+      notused.clear();
+      singused.clear();
+      transit.clear();
       for (int i = 0; i < chcs.size(); i++)
       {
         auto & hr = chcs[i];
+        hr.id = i;
         ExprSet cnjs;
         getConj(hr.body, cnjs);
         map<Expr, ExprSet> vars;      // preps
@@ -1524,6 +1539,8 @@ namespace ufo
           }
         }
 
+        if (onlyTrans) continue;
+
         for (auto & v : hr.srcVars)
         {
           if (contains(transSrc, v)) continue;
@@ -1547,6 +1564,11 @@ namespace ufo
           if (f == 1) singused[i].insert(w);
         }
       }
+    }
+
+    void eliminateTransitVars()
+    {
+      prepTransitVars(false);
       for (auto & a : newVars)
       {
         for (auto & v : a.second)

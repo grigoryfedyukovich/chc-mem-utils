@@ -197,19 +197,25 @@ namespace ufo
     return conjoin(comm, d1->getFactory());
   }
 
-  template <typename T> static Expr distribDisjoin(T& d, ExprFactory &efac)
+  template <typename T> static void distribDisjoin(T& d,
+                                            ExprSet& comm, ExprFactory &efac)
   {
-    if (d.size() <= 1) return disjoin(d, efac);
+    if (d.size() <= 1)
+    {
+      comm.insert(disjoin(d, efac));
+      return;
+    }
 
     vector<ExprSet> dsjs;
     for (auto &f : d)
     {
-      dsjs.push_back(ExprSet());
-      getConj(f, dsjs.back());
-      reorientEqualities(dsjs.back());
+      ExprSet tmp;
+      getConj(f, tmp);
+      reorientEqualities(tmp);
+      dsjs.push_back(tmp);
     }
 
-    ExprSet comm = dsjs[0];
+    comm = dsjs[0];
     for (int i = 1; i < dsjs.size(); i++)
     {
       ExprSet updComm, tmp;
@@ -225,6 +231,12 @@ namespace ufo
       toDisj.insert(conjoin(a, efac));
     }
     comm.insert(disjoin(toDisj, efac));
+  }
+
+  template <typename T> static Expr distribDisjoin(T& d, ExprFactory &efac)
+  {
+    ExprSet comm;
+    distribDisjoin(d, comm, efac);
     return conjoin(comm, efac);
   }
 
@@ -1473,7 +1485,7 @@ namespace ufo
     if (r == NULL)
       return exp;
     else
-      return replaceAll(exp, r, l);
+      return mk<AND>(mk<EQ>(l, r), replaceAll(exp, r, l));
   }
 
   static bool evalSelectEq(Expr e);
@@ -1486,8 +1498,13 @@ namespace ufo
       // GF: to enhance
 
       if (isOpX<STORE>(exp))
-        exp = mk<STORE>(duplChainOfStores(exp->left(), exp->right()),
+      {
+        if (isOpX<CONST_ARRAY>(exp->left()) &&
+          exp->last() == exp->left()->right())
+            return exp->left();
+        return mk<STORE>(duplChainOfStores(exp->left(), exp->right()),
           exp->right(), exp->last());
+      }
 
       if (isOpX<SELECT>(exp))
       {
@@ -3076,7 +3093,8 @@ namespace ufo
       if (dsjsSet.size() > 1)
       {
         ExprSet newDsjs;
-        for (auto & d : dsjsSet) newDsjs.insert(simpleQE(d, quantified, toAvoid, 0));
+        for (auto & d : dsjsSet)
+          newDsjs.insert(simpleQE(d, quantified, toAvoid, 0));
         return distribDisjoin(newDsjs, efac);
       }
     }

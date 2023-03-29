@@ -11,18 +11,6 @@ using namespace std;
 using namespace boost;
 namespace ufo
 {
-  struct ArrAccessIter
-  {
-    bool grows;
-    Expr iter;
-    Expr qv;
-    Expr precond;
-    Expr postcond;
-    Expr range;
-    bool closed;
-    vector<int> mbp;
-  };
-
   static bool (*weakeningPriorities[])(Expr, tribool) =
   {
     [](Expr cand, tribool val) { return bool(!val); },
@@ -63,8 +51,6 @@ namespace ufo
     map<int, ExprSet> mbps;
 
     map<int, ExprVector> candidates;
-    map<int, vector<ArrAccessIter* >> qvits; // per cycle
-    map<int, ExprSet> qvars;
 
     public:
 
@@ -306,7 +292,8 @@ namespace ufo
       {
         if (dstNum < 0)
         {
-          if (printLog >= 4) outs () << "      Trivially true since " << hr.dstRelation << " is not initialized\n";
+          if (printLog >= 4) outs () << "      Trivially true since "
+                        << hr.dstRelation << " is not initialized\n";
           return false;
         }
         if (checkAll && annotations[dstNum].empty())
@@ -327,10 +314,13 @@ namespace ufo
         }
       }
 
-      if (!hr.isQuery)
+      ExprSet negged;
+      if (hr.isQuery)
+        negged = {mk<TRUE>(m_efac)};
+      else
       {
-        ExprSet lms = sfs[dstNum].back().learnedExprs;
-        ExprSet negged;
+        ExprSet lms;
+        if (checkAll) lms = sfs[dstNum].back().learnedExprs;
         lms.insert(annotations[dstNum].begin(), annotations[dstNum].end());
         for (auto a : lms)
         {
@@ -338,14 +328,14 @@ namespace ufo
             a = replaceAll(a, v.second, hr.dstVars[v.first]);
           negged.insert(mkNeg(a));
         }
-        exprs.insert(disjoin(negged, m_efac));
       }
-      return wrapSMT(hr, exprs);
+      return wrapSMT(hr, exprs, negged);
     }
 
     // could be redefined and extra tricks added
-    virtual tribool wrapSMT(HornRuleExt& hr, ExprSet& exprs)
+    virtual tribool wrapSMT(HornRuleExt& hr, ExprSet& exprs, ExprSet& negged)
     {
+      exprs.insert(disjoin(negged, m_efac));
       return u.isSat(exprs);
     }
 
