@@ -320,20 +320,38 @@ namespace ufo
     {
       ExprVector ites;
       getITEs(ex, ites);
-      int sz = ites.size();
+      bool did = false;
+
+      Expr freshVar = boolConst(mkTerm<string> ("_nonexnam", ex->getFactory()));
+
       for (auto it = ites.begin(); it != ites.end();)
       {
-        Expr tmp;
-        if (implies(ex, (*it)->left()))
+        if (!isBoolean(*it)) { ++it; continue; }
+        Expr tmp, repl = replaceAll(ex, *it, freshVar);
+        if (implies(repl, (*it)->left()))
           tmp = (*it)->right();
-        else if (implies(ex, mk<NEG>((*it)->left())))
+        else if (implies(repl, mk<NEG>((*it)->left())))
           tmp = (*it)->last();
         else {++it; continue; }
-
         ex = replaceAll(ex, *it, tmp);
         it = ites.erase(it);
+        did = true;
       }
-      if (sz == ites.size()) return ex;
+
+      ExprSet impls;
+      getImpls(ex, impls);
+      for (auto it = impls.begin(); it != impls.end();)
+      {
+        Expr tmp, repl = replaceAll(ex, *it, freshVar);
+        if (implies(repl, (*it)->left()))
+          tmp = (*it)->right();
+        else {++it; continue; }
+        ex = replaceAll(ex, *it, tmp);
+        it = impls.erase(it);
+        did = true;
+      }
+
+      if (!did) return ex;
       else return simplifyBool(simplifyArithm(removeITE(ex)));
     }
 

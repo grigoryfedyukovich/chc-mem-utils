@@ -527,7 +527,6 @@ namespace ufo
               if (fname == "reallocate")
               {
                 assert(name == "object-address");
-                outs () << obj << ", " << l->arg(3) << "\n";
 
                 auto h = getVarByName(obj->last(), ty);
                 h = getVarId(h);
@@ -770,7 +769,7 @@ namespace ufo
               return var;
             }
             else
-              return simpextract(type, mk<SELECT>(mk<SELECT>(mem, h), nums[0]));
+              return simpextract(type, 0, mk<SELECT>(mk<SELECT>(mem, h), nums[0]));
           }
           else if (isOpX<FAPP>(obj) &&
                  lexical_cast<string>(obj->left()->left()).
@@ -799,7 +798,7 @@ namespace ufo
             Expr h = getVarId(objj);
             Expr k = getVarId(field);
             typeSafeInsert(defs, mem);
-            return simpextract(type,
+            return simpextract(type, 0,
               mk<SELECT>(mk<SELECT>(mem, mk<SELECT>(alloc, h)), k));
           }
           else if (isOpX<BADD>(obj))
@@ -812,7 +811,7 @@ namespace ufo
               Expr ind = isOpX<BMUL>(obj->right()) ?
                               obj->right()->left() : obj->right();
 
-              return simpextract(type, mk<SELECT>(base, mk<BADD>(
+              return simpextract(type, 0, mk<SELECT>(base, mk<BADD>(
                    mk<SELECT>(off, base->right()->right()), ind)));
             }
             else
@@ -820,7 +819,7 @@ namespace ufo
               ExprVector sels;
               getFlatSelect(obj, sels, off);
               if (sels.size() == 1)
-                return simpextract(type,mk<SELECT>(mk<SELECT>(mem,
+                return simpextract(type, 0, mk<SELECT>(mk<SELECT>(mem,
                   mk<SELECT>(alloc, sels[0]->right())), obj));
             }
             assert(0);
@@ -830,7 +829,7 @@ namespace ufo
             assert(mem == obj->left());
             assert(isOpX<SELECT>(obj->right()));
             assert(alloc == obj->right()->left());
-            return simpextract(type, mk<SELECT>(obj,
+            return simpextract(type, 0, mk<SELECT>(obj,
                 mk<SELECT>(off, obj->right()->right())));
           }
         }

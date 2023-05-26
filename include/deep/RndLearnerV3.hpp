@@ -87,12 +87,13 @@ namespace ufo
       for (auto & a : cands) addCandidate(invNum, a);
     }
 
-    void addLemma (int invNum, SamplFactory& sf, Expr l)
+    bool addLemma (int invNum, SamplFactory& sf, Expr l)
     {
       if (printLog)
         outs () << "Added lemma for " << decls[invNum] << ": " << l
                 << (printLog >= 2 ? " 👍\n" : "\n");
       sf.learnedExprs.insert(l);
+      return true;
     }
 
     bool filterUnsat()
@@ -339,8 +340,9 @@ namespace ufo
       return u.isSat(exprs);
     }
 
-    void assignPrioritiesForLearned()
+    bool assignPrioritiesForLearned()
     {
+      bool ret = false;
       for (auto & cand : candidates)
       {
         if (cand.second.size() > 0)
@@ -351,18 +353,19 @@ namespace ufo
             b = simplifyArithm(b);
             if (!statsInitialized || containsOp<ARRAY_TY>(b)
                     || containsOp<BOOL_TY>(b) || findNonlin(b))
-              addLemma(cand.first, sf, b);
+              ret |= addLemma(cand.first, sf, b);
             else
             {
               Expr learnedCand = normalizeDisj(b, invarVarsShort[cand.first]);
               Sampl& s = sf.exprToSampl(learnedCand);
               sf.assignPrioritiesForLearned();
               if (!u.implies(sf.getAllLemmas(), learnedCand))
-                addLemma(cand.first, sf, learnedCand);
+                ret |= addLemma(cand.first, sf, learnedCand);
             }
           }
         }
       }
+      return ret;
     }
 
     void printCands(bool proof = false)

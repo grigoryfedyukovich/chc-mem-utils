@@ -1021,6 +1021,11 @@ namespace ufo
 
       for (auto d = decls.begin(); d != decls.end(); )
       {
+        if (contains(loopheads, (*d)->left()))
+        {
+          ++d;
+          continue;
+        }
         vector<int> src, dst;
         for (int i = 0; i < chcs.size(); i++)
         {
@@ -1033,20 +1038,44 @@ namespace ufo
         }
 
         if (src.size() > 0 && dst.size() > 0 && emptyIntersect(src, dst) &&
-            emptyIntersect(simplCHCs, src) && emptyIntersect(simplCHCs, dst) &&
-            (src.size() == 1 || dst.size() == 1))
+            emptyIntersect(simplCHCs, src) && emptyIntersect(simplCHCs, dst))
         {
-          if (declToRemove != NULL)
-            if (declToRemove->arity() > (*d)->arity())
-              { ++d; continue; }
-          if (declToRemove != NULL)
-            if (declToRemove->arity() == (*d)->arity() &&
-                src.size() * dst.size() > srcMax.size() * dstMax.size())
-              { ++d; continue; }
+          if (src.size() == 1 || dst.size() == 1)
+          {
+            if (declToRemove != NULL)
+              if (declToRemove->arity() > (*d)->arity())
+                { ++d; continue; }
+            if (declToRemove != NULL)
+              if (declToRemove->arity() == (*d)->arity() &&
+                  src.size() * dst.size() > srcMax.size() * dstMax.size())
+                { ++d; continue; }
 
-          srcMax = src;
-          dstMax = dst;
-          declToRemove = *d;
+            srcMax = src;
+            dstMax = dst;
+            declToRemove = *d;
+          }
+          else
+          {
+            bool allQs = true;
+            for (int i : src)
+              if (!chcs[i].isQuery)
+                allQs = false;
+
+            if (allQs)
+              for (int j : dst)
+                if (chcs[j].isFact)
+                {
+                  for (int i : src)
+                    if (u.isSat(getConcatBody(i, j)))
+                    {
+                      errs () << "Counterexample found (during preprocessing)\n";
+                      return false;
+                    }
+
+                  // all unsat at this point => remove chc
+                  toEraseChcsTmp.insert(j);
+                }
+          }
         }
 
         if (src.size() == 0) // found dangling CHCs
@@ -1093,6 +1122,31 @@ namespace ufo
       return true;
     }
 
+    Expr getConcatBody(int i, int j, ExprVector& vars, ExprVector& dvars)
+    {
+      HornRuleExt* s = &chcs[i];
+      HornRuleExt* d = &chcs[j];
+      dvars = d->dstVars;
+
+      for (int i = 0; i < d->dstVars.size(); i++)
+        vars.push_back(cloneVar(d->dstVars[i],
+          mkTerm<string> ("__bnd_var_" + to_string(glob_ind++), m_efac)));
+
+      Expr body = replaceAll(s->body, s->srcVars, vars);
+      dvars.insert(dvars.end(), d->locVars.begin(), d->locVars.end());
+      for (int i = 0; i < d->locVars.size(); i++)
+        vars.push_back(cloneVar(d->locVars[i],
+          mkTerm<string> ("__loc_var_" + to_string(glob_ind++), m_efac)));
+
+      return mk<AND>(replaceAll(d->body, dvars, vars), body);
+    }
+
+    Expr getConcatBody(int i, int j)
+    {
+      ExprVector vars, dvars;
+      return getConcatBody(i, j, vars, dvars);
+    }
+
     void concatenateCHCs(int i, int j)
     {
       chcs.push_back(HornRuleExt());
@@ -1108,28 +1162,11 @@ namespace ufo
       n->srcRelation = d->srcRelation;
       n->dstRelation = s->dstRelation;
       n->srcVars = d->srcVars;
-      n->dstVars = d->dstVars;
-
-      ExprVector newVars;
-      for (int i = 0; i < d->dstVars.size(); i++)
-      {
-        Expr new_name = mkTerm<string> ("__bnd_var_" +
-          to_string(glob_ind++), m_efac);
-        newVars.push_back(cloneVar(d->dstVars[i], new_name));
-      }
-      Expr mergedBody = replaceAll(s->body, s->srcVars, newVars);
-      n->dstVars.insert(n->dstVars.end(), d->locVars.begin(), d->locVars.end());
-      for (int i = 0; i < d->locVars.size(); i++)
-      {
-        Expr new_name = mkTerm<string> ("__loc_var_" +
-          to_string(glob_ind++), m_efac);
-        newVars.push_back(cloneVar(d->locVars[i], new_name));
-      }
-      mergedBody = mk<AND>(replaceAll(d->body, n->dstVars, newVars), mergedBody);
-      n->locVars = newVars;
+      Expr mergedBody = getConcatBody(i, j, n->locVars, n->dstVars);
       n->locVars.insert(n->locVars.end(), s->locVars.begin(), s->locVars.end());
-      auto tmp = simpleQE(mergedBody, n->locVars);
-      n->body = fixpointRewrite(tmp,
+      mergedBody = simpleQE(mergedBody, n->locVars);
+      mergedBody = u.removeITE(mergedBody);
+      n->body = fixpointRewrite(mergedBody,
         [](Expr e){ return
           simplifyArr(
           simpConstArr(
@@ -1318,7 +1355,7 @@ namespace ufo
                     if (isOpX<SELECT>(l->left()) && isZero(l->right()))
                       if (mem == l->left()->left() && *it == l->left()->right())
                       {
-                        auto extr = simpextract(typeOf(newVarPr), l->last());
+                        auto extr = simpextract(typeOf(newVarPr), 0, l->last());
                         toAdd.push_back(mk<EQ>(newVarPr, extr));
                         addVar(hr.dstRelation, newVar);
                         hr.writeVars.insert(newVar);

@@ -2,7 +2,7 @@
 #define __EXPR_BV__HH_
 
 /** Bit-Vector expressions
- 
+
  * This file is included from middle of Expr.hpp
  */
 namespace expr
@@ -16,7 +16,7 @@ namespace expr
         unsigned m_width;
         BvSort (unsigned width) : m_width (width) {}
         BvSort (const BvSort &o) : m_width (o.m_width) {}
-        
+
         bool operator< (const BvSort &b) const { return m_width < b.m_width; }
         bool operator== (const BvSort &b) const { return m_width == b.m_width; }
         bool operator!= (const BvSort &b) const { return m_width != b.m_width; }
@@ -162,12 +162,22 @@ namespace expr
                              mkTerm<unsigned> (low, v->efac ()), v);
       }
 
-      /// high bit to extract
+      inline Expr rotate_right (unsigned t, Expr v)
+      {
+        return mk<BROTATE_RIGHT> (mkTerm<unsigned> (t, v->efac ()), v);
+      }
+
+      inline Expr rotate_left (unsigned t, Expr v)
+      {
+        return mk<BROTATE_LEFT> (mkTerm<unsigned> (t, v->efac ()), v);
+      }
+
+      /// high bit to extract (or rotate)
       inline unsigned high (Expr v) {return getTerm<unsigned> (v->arg (0));}
       /// low bit to extract
       inline unsigned low (Expr v) {return getTerm<unsigned> (v->arg (1));}
       /// bv argument to extract
-      inline Expr earg (Expr v) {return v->arg (2);}
+      inline Expr earg (Expr v) {return v->last();}
 
       inline Expr sext (Expr v, unsigned width)
       {return mk<BSEXT> (v, bvsort (width, v->efac ()));}

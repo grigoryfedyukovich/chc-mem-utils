@@ -809,10 +809,13 @@ namespace ufo
       Expr rel = decls[ind];
       if (!hasOnlyVars(e, ruleManager.invVars[rel])) return;
 
+      if (!containsOp<FAPP>(e)) return;
+
       e = simplifyBool(simplifyBV(e));
       if (find(candidates[ind].begin(), candidates[ind].end(), e) !=
                candidates[ind].end()) return;
 
+      if (!containsOp<FAPP>(e)) return;
       if (split)
       {
         ExprSet factored;
@@ -821,6 +824,7 @@ namespace ufo
         {
           for (auto & f : factored)
           {
+            if (!containsOp<FAPP>(f)) continue;
             ExprSet dsjs;
             getDisj (f, dsjs);
             if (dsjs.size() < 3)
@@ -1054,6 +1058,7 @@ namespace ufo
                        ruleManager.invVars[c.srcRelation], indSrc, 1);
     }
 
+
     void processTrans(HornRuleExt& c)
     {
       int indSrc = getVarIndex(c.srcRelation, decls);
@@ -1062,12 +1067,20 @@ namespace ufo
       ExprSet bodyCnjs;
       getConj(c.body, bodyCnjs);
 
+      ExprMap repl;
+      for (auto & t : ruleManager.transit[c.id])
+        repl[t.second] = t.first;
+
       for (auto a : bodyCnjs)
       {
-        preproAdder(a, ruleManager.invVars[c.dstRelation],
+        preproAdder(
+          replaceAllRev(a, repl),
+          ruleManager.invVars[c.dstRelation],
                        ruleManager.invVarsPrime[c.dstRelation], indDst, 2);
 
-        preproAdder(a, ruleManager.invVars[c.srcRelation],
+        preproAdder(
+          replaceAll(a, repl),
+          ruleManager.invVars[c.srcRelation],
                        ruleManager.invVars[c.srcRelation], indSrc, 299);
       }
     }
@@ -1803,6 +1816,19 @@ namespace ufo
       }
     }
 
+    void shrinkDecls()
+    {
+      for (auto it = decls.begin(); it != decls.end();)
+      {
+        bool found = false;
+        for (auto decl : ruleManager.decls)
+          if (decl->left() == *it)
+            found = true;
+        if (found) ++it;
+        else it = decls.erase(it);
+      }
+    }
+
     tribool invSyn(int ser, int b = 0)
     {
       candidates.clear();
@@ -1871,6 +1897,7 @@ namespace ufo
       }
 
       auto tmp = candidates;
+      bool toGiveUp = true;
       for (int i = 0; i < mutNum; i++)
       {
         mutateCandidates(i);
@@ -1879,20 +1906,22 @@ namespace ufo
           if (j > 0) candidates = candidatesNext;
           removeDupCandidates();
           auto res = multiHoudini(ruleManager.allCHCs);
+          if (res) res = assignPrioritiesForLearned();
           if (res)
           {
-            assignPrioritiesForLearned();
+            toGiveUp = false;
             if (printLog) printStats();
             if (ser == 0 && checkAllLemmas())
-            {
-              printSolution();
               return true;
-            }
           }
         }
         candidates = tmp;
       }
-
+      if (toGiveUp)
+      {
+        errs () << "give up after " << b << " iters\n";
+        return indeterminate;
+      }
       return invSyn(ser, b + 1);
     }
 
@@ -2083,6 +2112,8 @@ namespace ufo
 
     if (ds.invSyn(serial))
     {
+      ds.shrinkDecls();
+      ds.printSolution();
       errs() << "sat\n";
       outs() << "Total # of SMT calls: " <<
                 (ruleManager.getStat() + ds.getStat()) << "\n";

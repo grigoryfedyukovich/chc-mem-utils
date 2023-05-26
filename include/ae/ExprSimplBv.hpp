@@ -94,6 +94,18 @@ namespace ufo
     return mk<BSEXT> (v, ty);
   }
 
+  inline static Expr simpzext (Expr v, Expr ty)
+  {
+    if (isOpX<BZEXT>(v))
+    {
+      assert(width(v->last()) <= width(ty));
+      return simpzext(v->left(), ty);
+    }
+    if (is_bvnum(v))
+      return bvnum(v->left(), ty);
+    return mk<BZEXT> (v, ty);
+  }
+
   inline static void getBAddTerm (Expr a, ExprVector &ptrms, ExprVector &ntrms)
   {
     if (isOpX<BSEXT>(a))
@@ -257,20 +269,42 @@ namespace ufo
     return reBuildCmp(e, mkb<BADD>(ptrms, z), mkb<BADD>(ntrms, z));
   }
 
-  Expr simpextract(Expr ty, Expr exp)
+  Expr simpextract(Expr ty, int lo, Expr exp)
   {
     int w = width(ty);
     int w1 = width(typeOf(exp));
-    assert(w1 >= w);
-    if (w1 == w) return exp;
+    assert(w1 + lo >= w);
+    if (w1 == w && lo == 0) return exp;
 
-    if (isOpX<BEXTRACT>(exp)) return simpextract(ty, exp->last());
+    if (isOpX<BEXTRACT>(exp))
+      return simpextract(ty, lo+low(exp), exp->last());
+
     if (isOpX<BSEXT>(exp) || isOpX<BZEXT>(exp))
     {
-      if (width(typeOf(exp->left())) >= w)
-       return simpextract(ty, exp->left());
+      if (width(typeOf(exp->left())) >= w + lo)
+      {
+       return simpextract(ty, lo, exp->left());
+      }
     }
-    return bv::extract (w-1, 0, exp);
+
+    if (isOpX<BCONCAT>(exp))
+    {
+      int w1 = width(typeOf(exp->right()));
+      int w2 = width(typeOf(exp->left()));
+
+      if (w + lo <= w1)
+        return simpextract(ty, lo, exp->right());
+      if (lo >= w1 && lo + w <= w1 + w2)
+        return simpextract(ty, lo-w1, exp->left());
+    }
+    if (isOpX<BLSHR>(exp) && is_bvnum(exp->last()))
+    {
+      int w1 = width(typeOf(exp->left()));
+      int sh = lexical_cast<int>(toMpz(exp->last()));
+      if (w <= w1 - sh)
+        return simpextract(ty, lo+sh, exp->left());
+    }
+    return bv::extract (lo+w-1, lo, exp);
   }
 
   struct SimplifyBVExpr
@@ -331,11 +365,15 @@ namespace ufo
       }
       if (isOpX<BEXTRACT>(exp))
       {
-        return simpextract(typeOf(exp), exp->last());
+        return simpextract(typeOf(exp), low(exp), exp->last());
       }
       else if (isOpX<BSEXT>(exp))
       {
         return simpsext(exp->left(), exp->last());
+      }
+      else if (isOpX<BZEXT>(exp))
+      {
+        return simpzext(exp->left(), exp->last());
       }
       if (isOpX<BADD>(exp) && exp->arity() == 2)
       {

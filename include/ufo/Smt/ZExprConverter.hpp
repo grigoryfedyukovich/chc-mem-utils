@@ -261,6 +261,7 @@ namespace ufo
 	}
 
       int arity = e->arity ();
+
       /** other terminal expressions */
       if (arity == 0) return M::marshal (e, ctx, cache, seen);
 
@@ -305,6 +306,16 @@ namespace ufo
         }
 
         return M::marshal (e, ctx, cache, seen);
+      }
+      else if (isOpX<BROTATE_LEFT> (e))
+      {
+        z3::ast a (ctx, marshal (bv::earg (e), ctx, cache, seen));
+        res = Z3_mk_rotate_left (ctx, bv::high (e), a);
+      }
+      else if (isOpX<BROTATE_RIGHT> (e))
+      {
+        z3::ast a (ctx, marshal (bv::earg (e), ctx, cache, seen));
+        res = Z3_mk_rotate_right (ctx, bv::high (e), a);
       }
       else if (arity == 2)
       {
@@ -737,7 +748,24 @@ namespace ufo
         unsigned low = Z3_get_decl_int_parameter (ctx, d, 1);
         return bv::extract (high, low, arg);
       }
+      if (dkind == Z3_OP_ROTATE_LEFT)
+      {
+        Expr arg = unmarshal (z3::ast (ctx, Z3_get_app_arg (ctx, app, 0)),
+                              efac, cache, seen, adts_seen, adts);
 
+        Z3_func_decl d = Z3_get_app_decl (ctx, app);
+        unsigned t = Z3_get_decl_int_parameter (ctx, d, 0);
+        return bv::rotate_left (t, arg);
+      }
+      if (dkind == Z3_OP_ROTATE_RIGHT)
+      {
+        Expr arg = unmarshal (z3::ast (ctx, Z3_get_app_arg (ctx, app, 0)),
+                              efac, cache, seen, adts_seen, adts);
+
+        Z3_func_decl d = Z3_get_app_decl (ctx, app);
+        unsigned t = Z3_get_decl_int_parameter (ctx, d, 0);
+        return bv::rotate_right (t, arg);
+      }
 
       if (dkind == Z3_OP_AS_ARRAY)
       {

@@ -3250,6 +3250,8 @@ namespace expr
         if (isOp<BvOp>(v))
         {
           if (isOpX<BSEXT>(v) || isOpX<BZEXT>(v)) return v->last();
+          if (isOpX<BROTATE_LEFT>(v) || isOpX<BROTATE_RIGHT>(v))
+            return typeOf(v->last());
           if (isOpX<BCONCAT>(v))
           {
             return bvsort (width(typeOf(v->arg(0))) + width(typeOf(v->arg(1))),

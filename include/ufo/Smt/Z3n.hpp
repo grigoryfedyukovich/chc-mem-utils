@@ -198,7 +198,6 @@ namespace ufo
       }
 
       z3::ast ast (ctx, Z3_mk_and(ctx, Z3_ast_vector_size(ctx, b), args));
-      std::cout << ast << "\n";
       ctx.check_error ();
       return z3.toExpr (ast);
     }
