@@ -1140,6 +1140,20 @@ namespace expr
 
   typedef std::unordered_map<ENode*,Expr> DagVisitCache;
 
+  ExprMap rewrRepls;
+  bool cacheRewrs = false;  // global flag to enable cashing the replaced exprs
+
+  void refreshMap(ExprMap& m, Expr k, Expr v)
+  {
+    if (!cacheRewrs) return;  // to refactor
+    for (auto & a : m)
+    {
+      if (a.first == v)
+        v = a.second;
+    }
+    m[k] = v;
+  }
+
   template <typename ExprVisitor>
   Expr visit (ExprVisitor &v, Expr expr, DagVisitCache &cache)
   {
@@ -1177,12 +1191,12 @@ namespace expr
 
 	    if (changed)
 	      {
-		if (!res->isMutable ())
-		  res = res->getFactory ().mkNary (res->op (),
-						   kids.begin (),
-						   kids.end ());
-		else
-		  res->renew_args (kids.begin (), kids.end ());
+          auto old = res;
+          if (!res->isMutable ())
+            res = res->getFactory ().mkNary (res->op (), kids.begin (), kids.end ());
+          else
+            res->renew_args (kids.begin (), kids.end ());
+          refreshMap(rewrRepls, res, old);    // to refactor
 	      }
 	  }
 

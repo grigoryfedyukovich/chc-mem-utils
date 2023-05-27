@@ -1,2 +1,1 @@
-add_subdirectory(bnd)
-add_subdirectory(mchc)
+add_subdirectory(equiv)
