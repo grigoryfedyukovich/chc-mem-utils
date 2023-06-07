@@ -848,12 +848,14 @@ namespace ufo
 
     void countersAnalysis()
     {
+      map<Expr, set<pair<Expr, Expr>>> cntbnds, ncntbnds;
+
       for(auto & c : ruleManager.chcs)
       {
         if (!c.isInductive) continue;
 
         auto rel = c.srcRelation;
-        auto ind = getVarIndex(c.dstRelation, decls);
+        auto ind = getVarIndex(rel, decls);
         auto lems = sfs[ind].back().learnedExprs;
         lems.insert(c.body);
         auto strbody = conjoin(lems, m_efac);
@@ -903,6 +905,119 @@ namespace ufo
               }
             }
           }
+        }
+
+        if (cnts < 3) continue;
+
+        ExprSet bds;
+        getConj(strbody, bds);
+        for (auto & cnt : counters[rel])
+          for (auto & b : bds)
+            if ((isOpX<BULT>(b) || isOpX<BULE>(b)) && contains(b->left(), cnt))
+              cntbnds[rel].insert({cnt, b});
+            else if (isOpX<BUGT>(b) && contains(b->right(), cnt))
+              cntbnds[rel].insert({cnt, mk<BULT>(b->right(), b->left())});
+            else if (isOpX<BUGE>(b) && contains(b->right(), cnt))
+              cntbnds[rel].insert({cnt, mk<BULE>(b->right(), b->left())});
+
+        for (auto & cnt : negCounters[rel])
+          for (auto & b : bds)
+            if ((isOpX<BUGT>(b) || isOpX<BUGE>(b)) && contains(b->left(), cnt))
+              ncntbnds[rel].insert({cnt, b});
+            else if (isOpX<BULT>(b) && contains(b->right(), cnt))
+              ncntbnds[rel].insert({cnt, mk<BUGT>(b->right(), b->left())});
+            else if (isOpX<BULE>(b) && contains(b->right(), cnt))
+              ncntbnds[rel].insert({cnt, mk<BUGE>(b->right(), b->left())});
+      }
+
+      if (cnts < 3) return;
+
+      map<Expr, ExprSet> allCounters;
+      for (auto & rel : decls)
+      {
+        allCounters[rel] = counters[rel];
+        allCounters[rel].insert(
+            negCounters[rel].begin(), negCounters[rel].end());
+      }
+
+      for (auto & c : ruleManager.chcs)
+      {
+        if (c.isInductive || c.isQuery) continue;
+        auto rel = c.dstRelation;
+        auto & vars = ruleManager.invVars[rel];
+        auto & varsP = ruleManager.invVarsPrime[rel];
+
+        ExprSet bds;
+        getConj(c.body, bds);
+
+        map<Expr, pair<Expr, Expr>> init;
+        Expr lb = NULL, ub = NULL;
+        for (auto & cnt : allCounters[rel])
+        {
+          Expr cntP = replaceAll(cnt, vars, varsP);
+          for (auto b : bds)
+          {
+            Expr asgn = NULL;
+            if (isOpX<EQ>(b) && b->left() == cntP)
+              asgn = b->right();
+            else if (isOpX<EQ>(b) && b->right() == cntP)
+              asgn = b->left();
+            if (asgn != NULL)
+              init[cnt] = {
+                replaceAll(b, varsP, vars), replaceAll(asgn, varsP, vars)};
+
+            // the rest is useful when an invariant is already found
+            if (isOpX<BULE>(b) && b->left() == cnt)
+              ub = b->right();
+            if (isOpX<BULE>(b) && b->right() == cnt)
+              lb = b->left();
+            if (isOpX<BUGE>(b) && b->left() == cnt)
+              lb = b->right();
+            if (isOpX<BUGE>(b) && b->right() == cnt)
+              ub = b->left();
+          }
+
+          if (lb != NULL && lb == ub)
+            init[cnt] = {
+              replaceAll(mk<EQ>(cnt, lb), varsP, vars),
+              replaceAll(lb, varsP, vars)};
+        }
+
+        auto ind = getVarIndex(rel, decls);
+        set<pair<Expr, pair<Expr, Expr>>> candBlocks;
+        for (auto & u : cntbnds[rel])
+        {
+          auto cnt = u.first;
+          if (init[cnt].first != NULL)
+          {
+            auto cand = mk<BULE>(u.second->left(),
+              isOpX<BULT>(u.second) ? u.second->right() :
+              mk<BADD>(u.second->right(),
+                bvnum(mkMPZ(1, m_efac), typeOf(u.second->right()))));
+            auto cond = replaceAll(u.second, cnt, init[cnt].second);
+            candBlocks.insert({cond, {cand, init[cnt].first}});
+          }
+        }
+
+        for (auto & u : ncntbnds[rel])
+        {
+          auto cnt = u.first;
+          if (init[cnt].first != NULL)
+          {
+            auto cand = mk<BUGE>(u.second->left(),
+              isOpX<BUGT>(u.second) ? u.second->right() :
+              mk<BSUB>(u.second->right(),
+                bvnum(mkMPZ(1, m_efac), typeOf(u.second->right()))));
+            auto cond = replaceAll(u.second, cnt, init[cnt].second);
+            candBlocks.insert({cond, {cand, init[cnt].first}});
+          }
+        }
+
+        for (auto & b : candBlocks)
+        {
+          addToCandidates(ind, b.second.first, 765);
+          addToCandidates(ind, mk<IMPL>(b.first, b.second.first), 765);
+          addToCandidates(ind, mk<IMPL>(mkNeg(b.first), b.second.second), 765);
         }
       }
     }
