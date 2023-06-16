@@ -132,7 +132,7 @@ namespace ufo
     // beginning of the preprocessing:
     // determine the alloca and mem vars
     // init defAlloc as const array (of type from alloc/mem storages)
-    void initAlloca()
+    bool initAlloca()
     {
       memTy = NULL;
       for (auto &d : ruleManager.decls)
@@ -141,6 +141,10 @@ namespace ufo
         allocMap[d->left()] = -1;
         offMap[d->left()] = -1;
         sizMap[d->left()] = -1;
+      }
+
+      for (auto &d : ruleManager.decls)
+      {
         if (printLog >= 3)
           outs () << "initAlloca, decl: " << d->left() << "\n";
         auto & vs = ruleManager.invVars[d->left()];
@@ -190,9 +194,11 @@ namespace ufo
             }
           }
         }
-        assert(allocMap[d->left()] != -1);
+        if (allocMap[d->left()] == -1)
+          return false;
         if(memMap[d->left()] == -1){
-          exit(9);
+          errs() << "Memory is never accessed\n";
+          return false;
         }
         Expr ty = typeOf(ruleManager.invVars[d->left()][memMap[d->left()]]);
         defAlloc = mk<CONST_ARRAY>(ty->left(), bvnum(mkMPZ(0, m_efac), ty->left()));
@@ -201,6 +207,7 @@ namespace ufo
         if (allocTy == NULL) allocTy = ty->right();
         else assert (allocTy == ty->right());
       }
+      return true;
     }
 
     // get a CHC r = body -> rel(..), look for its alloca storage (key -> val)
@@ -1524,32 +1531,36 @@ namespace ufo
           outs () << "    upbounds[" << d << "] (" << upbounds[d].size() << "):\n";
           pprint(upbounds[d], 6);
         }
-        auto sv = ruleManager.invVars[d][sizMap[d]];
-        auto ov = ruleManager.invVars[d][offMap[d]];
-        auto ty = typeOf(sv)->right();
-        Expr zero = bvnum(mkMPZ(0, m_efac), ty);
 
-        for (auto & al : aliases[d])
+        if (sizMap[d] >= 0)
         {
-          addToCandidates(ind, mk<BSGT>(mk<SELECT>(sv, al.first), zero), 12);
-          sizes[d].insert(mk<SELECT>(sv, al.first));
+          auto sv = ruleManager.invVars[d][sizMap[d]];
+          auto ov = ruleManager.invVars[d][offMap[d]];
+          auto ty = typeOf(sv)->right();
+          Expr zero = bvnum(mkMPZ(0, m_efac), ty);
 
-          if (cnts > 1)
+          for (auto & al : aliases[d])
           {
-            for (auto & v : ruleManager.invVars[d])
-              if (is_bvconst(v))
-                addToCandidates(ind,
-                  typeRepair(mk<EQ>(v, mk<SELECT>(sv, al.first))), 13);
+            addToCandidates(ind, mk<BSGT>(mk<SELECT>(sv, al.first), zero), 12);
+            sizes[d].insert(mk<SELECT>(sv, al.first));
 
-            for (auto & a : al.second)
+            if (cnts > 1)
             {
-              offsetsSizes.insert(mk<SELECT>(ov, a));
-              offsetsSizes.insert(mk<SELECT>(sv, al.first));
+              for (auto & v : ruleManager.invVars[d])
+                if (is_bvconst(v))
+                  addToCandidates(ind,
+                    typeRepair(mk<EQ>(v, mk<SELECT>(sv, al.first))), 13);
 
-              addToCandidates(ind,
-                mk<BSLT>(mk<SELECT>(ov, a), mk<SELECT>(sv, al.first)), 15);
-              addToCandidates(ind,
-                mk<BSLE>(mk<SELECT>(ov, a), mk<SELECT>(sv, al.first)), 16);
+              for (auto & a : al.second)
+              {
+                offsetsSizes.insert(mk<SELECT>(ov, a));
+                offsetsSizes.insert(mk<SELECT>(sv, al.first));
+
+                addToCandidates(ind,
+                  mk<BSLT>(mk<SELECT>(ov, a), mk<SELECT>(sv, al.first)), 15);
+                addToCandidates(ind,
+                  mk<BSLE>(mk<SELECT>(ov, a), mk<SELECT>(sv, al.first)), 16);
+              }
             }
           }
         }
@@ -2119,7 +2130,8 @@ namespace ufo
       {
         auto & c = ruleManager.chcs[j];
         if (c.isFact) simplCHCs.push_back(j);
-        if (c.isFact || c.isQuery) continue;
+        if (c.isFact || c.isQuery ||
+           memMap[c.srcRelation] == -1 || memMap[c.dstRelation] == -1) continue;
         Expr a = c.srcVars[memMap[c.srcRelation]];
         Expr b = c.dstVars[memMap[c.dstRelation]];
         bool broke = false;
@@ -2188,30 +2200,33 @@ namespace ufo
 
     if (mem)
     {
-      ds.initAlloca();
+      mem = ds.initAlloca();
       ds.simplifyCHCstruct();
       if (debug > 0)
       {
         outs () << "Simplifying CHCs (in progress):\n";
         ruleManager.print((debug > 3), (debug > 2), "chc_interm");
       }
-      ds.computeStableVars();
-      ds.getInitAllocaVals();
-      ds.getAllocaVals();
-      ds.getAliases();
-      ds.printAliases();
-      ds.addAliasVars();
-      ds.rewriteMem();
-      auto res = ruleManager.doElim(false);
-      if (debug > 0)
+      if (mem)
       {
-        outs() << "\nCHCs after memory-rewriting and simplification:\n";
-        ruleManager.print((debug > 3), false);
-      }
-      if (!res)
-      {
-        errs() << "unsat\n";
-        return;
+        ds.computeStableVars();
+        ds.getInitAllocaVals();
+        ds.getAllocaVals();
+        ds.getAliases();
+        ds.printAliases();
+        ds.addAliasVars();
+        ds.rewriteMem();
+        auto res = ruleManager.doElim(false);
+        if (debug > 0)
+        {
+          outs() << "\nCHCs after memory-rewriting and simplification:\n";
+          ruleManager.print((debug > 3), false);
+        }
+        if (!res)
+        {
+          errs() << "unsat\n";
+          return;
+        }
       }
     }
     else
@@ -2225,7 +2240,7 @@ namespace ufo
                               << ruleManager.decls.size() << "\n";
     }
 
-    if (ds.invSyn(serial))
+    if (ds.invSyn(serial, !mem))
     {
       ds.shrinkDecls();
       ds.printSolution();
