@@ -22,7 +22,7 @@ namespace ufo
     map<Expr, ExprSet> allocVals;
     map<Expr, map<Expr, ExprSet>> aliases, aliasesRev;
     map<Expr, ExprMap> arrVars, arrVarsPr;
-    Expr memTy, allocTy, defAlloc;
+    Expr memTy, allocTy, zeralloc;
     map<int, string>& varIds;
     Expr lastDecl = NULL;
     ExprSet offsetsSizes;
@@ -119,95 +119,80 @@ namespace ufo
         // currently, only alloc
         if (r.isFact || r.isQuery) continue;
 
-        auto a = r.srcVars[allocMap[r.srcRelation]];
-        auto b = r.dstVars[allocMap[r.dstRelation]];
+        auto s = allocMap[r.srcRelation], d = allocMap[r.dstRelation];
+        auto a = r.srcVars[s], b = r.dstVars[d];
 
         for (auto & t : ruleManager.transit[r.id])
           if (t.first == a && t.second == b)
-            stableVars[i].insert(
-              {allocMap[r.dstRelation], allocMap[r.srcRelation]});
+            stableVars[i].insert({d, s});
       }
     }
 
     // beginning of the preprocessing:
     // determine the alloca and mem vars
-    // init defAlloc as const array (of type from alloc/mem storages)
     bool initAlloca()
     {
       memTy = NULL;
-      for (auto &d : ruleManager.decls)
+      for (auto & d : ruleManager.decls)
       {
-        memMap[d->left()] = -1;
-        allocMap[d->left()] = -1;
-        offMap[d->left()] = -1;
-        sizMap[d->left()] = -1;
+        Expr decl = d->left();
+        memMap[decl] = -1;
+        allocMap[decl] = -1;
+        offMap[decl] = -1;
+        sizMap[decl] = -1;
       }
 
-      for (auto &d : ruleManager.decls)
+      for (auto & d : ruleManager.decls)
       {
-        if (printLog >= 3)
-          outs () << "initAlloca, decl: " << d->left() << "\n";
-        auto & vs = ruleManager.invVars[d->left()];
+        Expr decl = d->left();
+        if (printLog >= 3) outs () << "initAlloca, decl: " << decl << "\n";
+        auto & vs = ruleManager.invVars[decl];
         for (int i = 0; i < vs.size(); i++)
         {
           auto & v = vs[i];
           if (isArray(v))
           {
-            if (isOpX<BVSORT>(typeOf(v)->left()) &&
-                isOpX<BVSORT>(typeOf(v)->right()) &&
-                lexical_cast<string>(v) == "_alloc")
+            Expr ty = typeOf(v), rty = ty->right(), lty = ty->left();
+            if (isOpX<BVSORT>(lty) && isOpX<BVSORT>(rty))
             {
-              if (printLog >= 3) outs () << "  alloca arg # "  << i << ": "
-                  << v << "   " << typeOf(v) << "\n";
-              assert(allocMap[d->left()] == -1);
-              allocMap[d->left()] = i;
+              assignVarInd("_alloc", v, allocMap[decl], i);
+              assignVarInd("_off", v, offMap[decl], i);
+              assignVarInd("_siz", v, sizMap[decl], i);
+
             }
-            else if (isOpX<BVSORT>(typeOf(v)->left()) &&
-                isOpX<BVSORT>(typeOf(v)->right()) &&
-                lexical_cast<string>(v) == "_off")
-            {
-              if (printLog >= 3) outs () << "  off arg # "  << i << ": "
-                  << v << "   " << typeOf(v) << "\n";
-              assert(offMap[d->left()] == -1);
-              offMap[d->left()] = i;
-            }
-            else if (isOpX<BVSORT>(typeOf(v)->left()) &&
-                isOpX<BVSORT>(typeOf(v)->right()) &&
-                lexical_cast<string>(v) == "_siz")
-            {
-              if (printLog >= 3) outs () << "  siz arg # "  << i << ": "
-                  << v << "   " << typeOf(v) << "\n";
-              assert(sizMap[d->left()] == -1);
-              sizMap[d->left()] = i;
-            }
-            else if (isOpX<BVSORT>(typeOf(v)->left()) &&
-                     isOpX<ARRAY_TY>(typeOf(v)->right()) &&
-                     lexical_cast<string>(v) == "_mem")
-            {
-              if (printLog >= 3) outs () << "  mem arg # "  << i << ": "
-                  << v << "   " << typeOf(v) << "\n";
-              if(memMap[d->left()] != -1)
-              {
-                exit(9);
-              }
-              memMap[d->left()] = i;
-            }
+            else if (isOpX<BVSORT>(lty) && isOpX<ARRAY_TY>(rty))
+              assignVarInd("_mem", v, memMap[decl], i);
           }
         }
-        if (allocMap[d->left()] == -1)
+        if (allocMap[decl] == -1)
           return false;
-        if(memMap[d->left()] == -1){
+        if(memMap[decl] == -1){
           errs() << "Memory is never accessed\n";
           return false;
         }
-        Expr ty = typeOf(ruleManager.invVars[d->left()][memMap[d->left()]]);
-        defAlloc = mk<CONST_ARRAY>(ty->left(), bvnum(mkMPZ(0, m_efac), ty->left()));
-        if (memTy == NULL) memTy = ty;
-        else assert (memTy == ty);
-        if (allocTy == NULL) allocTy = ty->right();
-        else assert (allocTy == ty->right());
+        Expr ty = typeOf(ruleManager.invVars[decl][memMap[decl]]);
+        assert(ty->right() == typeOf(ruleManager.invVars[decl][allocMap[decl]]));
+        assignType(ty, memTy);
+        assignType(ty->right(), allocTy);
       }
+      assert(memTy != NULL);
+      zeralloc = bvnum(mkMPZ(0, m_efac), allocTy->left());
       return true;
+    }
+
+    void assignVarInd(string name, Expr v, int & pos, int i)
+    {
+      if (lexical_cast<string>(v) != name) return;
+      assert(pos == -1);
+      pos = i;
+      if (printLog >= 3) outs () << "  " << name << " arg # "  << i << ": "
+                                 << v << "   " << typeOf(v) << "\n";
+    }
+
+    void assignType(Expr ty, Expr& varTy)
+    {
+      if (varTy == NULL) varTy = ty;
+      else assert (varTy == ty);
     }
 
     // get a CHC r = body -> rel(..), look for its alloca storage (key -> val)
@@ -222,15 +207,14 @@ namespace ufo
     void extractPtrInfo(HornRuleExt & r, Expr init, Expr ptr)
     {
       auto & v = r.dstVars[allocMap[r.dstRelation]];
-      assert (isArray(v) && isOpX<BVSORT>(typeOf(v)->right()));
 
       if (printLog >= 6) outs () << "extractPtrInfo: "
           << r.srcRelation << " -> " << r.dstRelation << "\n";
 
       Expr key, val;
       if (ptr != NULL) key = ptr;
-      else key = mkConst(mkTerm<string> ("key", m_efac), typeOf(v)->left());
-      val = mkConst(mkTerm<string> ("val", m_efac), typeOf(v)->right());
+      else key = mkConst(mkTerm<string> ("key", m_efac), allocTy->left());
+      val = mkConst(mkTerm<string> ("val", m_efac), allocTy->right());
       ExprVector cnjs = {init, r.body, mk<EQ>(mk<SELECT>(v, key), val)};
 
       bool first = true;
@@ -265,8 +249,8 @@ namespace ufo
     Expr getAllocCand(Expr decl)
     {
       auto & v = ruleManager.invVars[decl][allocMap[decl]];
-      Expr key = mkConst(mkTerm<string> ("key", m_efac), typeOf(v)->left());
-      allocVals[decl].insert(bvnum(mkMPZ(0, m_efac), typeOf(v)->left()));
+      Expr key = mkConst(mkTerm<string> ("key", m_efac), allocTy->left());
+      allocVals[decl].insert(zeralloc);
 
       ExprSet dsjs;
       for (auto & val : allocVals[decl])
@@ -278,7 +262,7 @@ namespace ufo
     Expr getAliasCand(Expr decl, Expr ptr)
     {
       auto & v = ruleManager.invVars[decl][allocMap[decl]];
-      auto key = mkConst(mkTerm<string> ("key", m_efac), typeOf(v)->left());
+      auto key = mkConst(mkTerm<string> ("key", m_efac), allocTy->left());
       auto eq = mk<EQ>(mk<SELECT>(v, key), ptr);
       ExprSet dsjs;
       for (auto & k : aliases[decl][ptr]) dsjs.insert(mk<EQ>(key, k));
@@ -361,15 +345,17 @@ namespace ufo
       propagateAllocVals();
 
       // get init cands, from vals
-      for (auto & d : ruleManager.decls)
+      for (int ind = 0; ind < decls.size(); ind++)
       {
-        auto decl = d->left();
-        if (printLog >= 6) outs () << "getAllocaVals, decl " << d->left()
-                                  << ", ind = "<< getVarIndex(decl, decls)<< "\n";
-        // if (allocVals[decl].empty()) continue;
-        candidates[getVarIndex(decl, decls)] = { getAllocCand(decl)};
-        if (printLog >= 6) outs () << "  cands:\n";
-        if (printLog >= 6) pprint(candidates[getVarIndex(decl, decls)], 4);
+        Expr decl = decls[ind];
+        if (printLog >= 6) outs () << "getAllocaVals, decl " << decl
+                                   << ", ind = "<< ind << "\n";
+        candidates[ind] = {getAllocCand(decl)};
+        if (printLog >= 6)
+        {
+          outs () << "\ngetAllocaVals, decl: " << decl << ":\n";
+          pprint(candidates[ind], 4);
+        }
       }
 
       if (multiHoudini(ruleManager.allCHCs, false, true))
@@ -404,18 +390,18 @@ namespace ufo
     void getAliases(Expr ptr)
     {
       propagateAliases(ptr);
-      for (auto & d : ruleManager.decls)
+      for (int ind = 0; ind < decls.size(); ind++)
       {
-        auto decl = d->left();
-        if (printLog >= 6) outs () << "\ngetAliases, decl " << d->left()
-                            << ", ind = "<< getVarIndex(decl, decls)<< "\n";
+        Expr decl = decls[ind];
+        if (printLog >= 6) outs () << "\ngetAliases, decl " << decl
+                                   << ", ind = "<< ind << "\n";
 
-        candidates[getVarIndex(decl, decls)] = {getAliasCand(decl, ptr)};
+        candidates[ind] = {getAliasCand(decl, ptr)};
 
         if (printLog >= 6)
         {
-          outs () << "  decl: " << decl << ", " << ptr << "\ncands:\n";
-          pprint(candidates[getVarIndex(decl, decls)], 4);
+          outs () << "\ngetAliases, decl: " << decl << " vs " << ptr << ":\n";
+          pprint(candidates[ind], 4);
         }
       }
       if (multiHoudini(ruleManager.allCHCs, false, true))
@@ -445,8 +431,8 @@ namespace ufo
     void getAliases()
     {
       ExprSet all;
-      for (auto & d : ruleManager.decls)
-        for (auto & val : allocVals[d->left()])
+      for (auto & d : decls)
+        for (auto & val : allocVals[d])
           if (lexical_cast<string>(toMpz(val)) != "0")
             all.insert(val);
       for (auto & a : all)
@@ -458,18 +444,13 @@ namespace ufo
 
     void printAliases()
     {
-      for (auto & d : ruleManager.decls)
+      if (printLog < 2) return;
+      for (auto & d : decls)
       {
-        if (printLog >= 2)
-          outs () << "  >> decl >>  " << d->left() << ":\n";
-        for (auto & al : aliases[d->left()])
-        {
+        outs () << "  >> decl >>  " << d << ":\n";
+        for (auto & al : aliases[d])
           for (auto & a : al.second)
-          {
-            if (printLog >= 2)
-              outs () << "    " << a << "  ->  " << al.first << "\n";
-          }
-        }
+            outs () << "    " << a << "  ->  " << al.first << "\n";
       }
     }
 
@@ -488,9 +469,9 @@ namespace ufo
       if (printLog)
       {
         ExprSet aa, ab;
-        for (auto & d : ruleManager.decls)
+        for (auto & d : decls)
         {
-          for (auto & al : aliases[d->left()])
+          for (auto & al : aliases[d])
           {
             aa.insert(al.first);
 
@@ -503,26 +484,26 @@ namespace ufo
         outs () << "Detected memory regions: " << aa.size() <<
                    ", aliases: " << ab.size() << ",\n";
         outs () << "memory regions:\n";
-        pprint(aa,2);
+        pprint(aa, 2);
         outs () << "aliases:\n";
-        pprint(ab,2);
+        pprint(ab, 2);
       }
 
-      for (auto & d : ruleManager.decls)
+      for (int ind = 0; ind < decls.size(); ind++)
       {
-        for (auto & al : aliases[d->left()])
+        Expr d = decls[ind];
+        for (auto & al : aliases[d])
         {
           auto name = getNewArrName(al.first);
           auto a = mkConst(mkTerm<string> (name, m_efac), memTy->right());
           auto b = mkConst(mkTerm<string> (name + "'", m_efac), memTy->right());
           allArrVars.insert(a);
           allArrVarsPr.insert(b);
-          arrVars[d->left()][al.first] = a;
-          arrVarsPr[d->left()][al.first] = b;
-          auto ind = getVarIndex(d->left(), decls);
+          arrVars[d][al.first] = a;
+          arrVarsPr[d][al.first] = b;
           invarVars[ind][
-            ruleManager.invVars[d->left()].size() - 1 +
-            arrVars[d->left()].size()] = a;
+            ruleManager.invVars[d].size() - 1 +
+            arrVars[d].size()] = a;
         }
       }
     }
@@ -1032,7 +1013,7 @@ namespace ufo
     void simplifyCHCs()
     {
       if (printLog) outs() << "  Lemma-based CHC simplification\n";
-      for(auto & c : ruleManager.chcs)
+      for (auto & c : ruleManager.chcs)
       {
         auto b = c.body;
         ExprSet impls;
@@ -1485,10 +1466,9 @@ namespace ufo
 
     void processBounds()
     {
-      for (auto & decl : ruleManager.decls)
+      for (int ind = 0; ind < decls.size(); ind++)
       {
-        auto d = decl->left();
-        int ind = getVarIndex(d, decls);
+        Expr d = decls[ind];
 
         // get more bounds from lemmas
         for (auto & c : sfs[ind].back().learnedExprs)
@@ -1944,14 +1924,26 @@ namespace ufo
 
     void shrinkDecls()
     {
+      auto sit = sfs.begin();
+      auto vit1 = invarVars.begin();
+      auto vit2 = invarVarsShort.begin();
       for (auto it = decls.begin(); it != decls.end();)
       {
         bool found = false;
         for (auto decl : ruleManager.decls)
           if (decl->left() == *it)
             found = true;
-        if (found) ++it;
-        else it = decls.erase(it);
+        if (found)
+        {
+          ++it; ++sit; ++vit1; ++vit2;
+        }
+        else
+        {
+          it = decls.erase(it);
+          sit = sfs.erase(sit);
+          vit1 = invarVars.erase(vit1);
+          vit2 = invarVarsShort.erase(vit2);
+        }
       }
     }
 
@@ -1961,29 +1953,28 @@ namespace ufo
 
       if (b == 0)
       {
-        for (auto & d : ruleManager.decls)
+        for (int ind = 0; ind < decls.size(); ind++)
         {
-          int invNum = getVarIndex(d->left(), decls);
-          auto a = allocMap[d->left()];
-          auto o = offMap[d->left()];
-          auto av = ruleManager.invVars[d->left()][a];
-          auto ov = ruleManager.invVars[d->left()][o];
-          auto ty = typeOf(ov)->last();
-          for (auto & al : aliasesRev[d->left()])
+          Expr d = decls[ind];
+          auto a = allocMap[d];
+          auto o = offMap[d];
+          auto av = ruleManager.invVars[d][a];
+          auto ov = ruleManager.invVars[d][o];
+          auto z = bvnum(mkMPZ(0, m_efac), typeOf(ov)->last());
+          for (auto & al : aliasesRev[d])
           {
             ExprSet tmp;
 
             for (auto & a : al.second)
             {
               tmp.insert(mk<EQ>(mk<SELECT>(av, al.first), a));
-              addToCandidates(invNum, mk<EQ>(mk<SELECT>(ov, al.first),
-                  bvnum(mkMPZ(0, m_efac), ty)), 105);
+              addToCandidates(ind, mk<EQ>(mk<SELECT>(ov, al.first), z), 105);
             }
 
             ExprSet ncands;
             distribDisjoin(tmp, ncands, m_efac);
             for (auto & a : ncands)
-              addToCandidates(invNum, a, 100);
+              addToCandidates(ind, a, 100);
           }
         }
       }
@@ -2015,7 +2006,7 @@ namespace ufo
         exit(0);
       }
 
-      for (int i = 0; i < ruleManager.decls.size() - 1; i++)
+      for (int i = 0; i < decls.size() - 1; i++)
       {
         for (auto & c : ruleManager.chcs)
           if (!c.isQuery && !c.isFact && !c.isInductive)
@@ -2054,18 +2045,15 @@ namespace ufo
     void printStats()
     {
       set<int> all, used;
-      for (auto & decl : ruleManager.decls)
+      for (int ind = 0; ind < decls.size(); ind++)
       {
-        auto d = decl->left();
-        int ind = getVarIndex(d, decls);
-          for (auto & b : origs[ind])
-          {
-            all.insert(b.first);
-            for (auto & l : sfs[ind].back().learnedExprs)
-            {
-              if (find(b.second.begin(), b.second.end(), l) != b.second.end())
-                used.insert(b.first);
-          }
+        Expr d = decls[ind];
+        for (auto & b : origs[ind])
+        {
+          all.insert(b.first);
+          for (auto & l : sfs[ind].back().learnedExprs)
+            if (find(b.second.begin(), b.second.end(), l) != b.second.end())
+              used.insert(b.first);
         }
       }
 
@@ -2177,10 +2165,7 @@ namespace ufo
     if (!ruleManager.hasBV) return;
 
     if (debug)
-    {
-      int n = ruleManager.getQum();
-      outs () << "Queries detected: " << n << "\n";
-    }
+      outs () << "Queries detected: " << ruleManager.getQum() << "\n";
 
     if (!ruleManager.hasCycles())
     {
@@ -2195,57 +2180,56 @@ namespace ufo
     MemProcessor ds(m_efac, z3, ruleManager,
                       norm, dat, cnt, mut, prj, varIds, debug, to);
 
-    for (auto dcl : ruleManager.decls)
-      ds.initializeDecl(dcl->left());
+    mem &= ds.initAlloca();
+    ds.simplifyCHCstruct();
+    for (auto dcl : ruleManager.decls) ds.initializeDecl(dcl->left());
 
-    if (mem)
+    if (debug > 0)
     {
-      mem = ds.initAlloca();
-      ds.simplifyCHCstruct();
-      if (debug > 0)
-      {
-        outs () << "Simplifying CHCs (in progress):\n";
-        ruleManager.print((debug > 3), (debug > 2), "chc_interm");
-      }
-      if (mem)
-      {
-        ds.computeStableVars();
-        ds.getInitAllocaVals();
-        ds.getAllocaVals();
-        ds.getAliases();
-        ds.printAliases();
-        ds.addAliasVars();
-        ds.rewriteMem();
-        auto res = ruleManager.doElim(false);
-        if (debug > 0)
-        {
-          outs() << "\nCHCs after memory-rewriting and simplification:\n";
-          ruleManager.print((debug > 3), false);
-        }
-        if (!res)
-        {
-          errs() << "unsat\n";
-          return;
-        }
-      }
-    }
-    else
-    {
-      auto res = ruleManager.doElim(false);
+      outs () << "Simplifying CHCs (in progress):\n";
+      ruleManager.print((debug > 3), (debug > 2), "chc_interm");
     }
 
     if (debug)
+      outs () << "Preprocess SMT calls: " << ruleManager.getStat() << "\n";
+
+    if (mem)
     {
+      ds.computeStableVars();
+      ds.getInitAllocaVals();
+      ds.getAllocaVals();
+      ds.getAliases();
+      ds.printAliases();
+      ds.addAliasVars();
+      ds.rewriteMem();
+      auto res = ruleManager.doElim(false);
+      if (debug > 0)
+      {
+        outs() << "\nCHCs after memory-rewriting and simplification:\n";
+        ruleManager.print((debug > 3), false);
+      }
+      if (res) ds.shrinkDecls();
+      else
+      {
+        errs() << "unsat\n";
+        return;
+      }
+    }
+
+    if (debug)
       outs () << "CHC size: " << ruleManager.chcs.size() << ", "
                               << ruleManager.decls.size() << "\n";
-    }
+
+    if (debug)
+      outs() << "SMT calls for alias analysis: " <<
+              (ruleManager.getStat() + ds.getStat()) << "\n";
+    outs().flush();
 
     if (ds.invSyn(serial, !mem))
     {
-      ds.shrinkDecls();
-      ds.printSolution();
+      ds.printSolution(false);
       errs() << "sat\n";
-      outs() << "Total # of SMT calls: " <<
+      outs() << "Total SMT calls: " <<
                 (ruleManager.getStat() + ds.getStat()) << "\n";
     }
     else
