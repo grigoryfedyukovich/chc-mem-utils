@@ -837,6 +837,7 @@ namespace ufo
     void countersAnalysis()
     {
       map<Expr, set<pair<Expr, Expr>>> cntbnds, ncntbnds;
+      map<Expr, map<Expr,ExprSet>> ccands;
 
       for(auto & c : ruleManager.chcs)
       {
@@ -907,6 +908,8 @@ namespace ufo
               cntbnds[rel].insert({cnt, mk<BULT>(b->right(), b->left())});
             else if (isOpX<BUGE>(b) && contains(b->right(), cnt))
               cntbnds[rel].insert({cnt, mk<BULE>(b->right(), b->left())});
+             else if (contains (b, cnt) && emptyIntersect(b, c.dstVars))
+              ccands[rel][cnt].insert(b);
 
         for (auto & cnt : negCounters[rel])
           for (auto & b : bds)
@@ -936,39 +939,16 @@ namespace ufo
         auto & varsP = ruleManager.invVarsPrime[rel];
 
         ExprSet bds;
-        getConj(c.body, bds);
+        getConj(replaceAll(c.body, varsP, vars), bds);
 
-        map<Expr, pair<Expr, Expr>> init;
-        Expr lb = NULL, ub = NULL;
+        map<Expr, ExprSet> init;
         for (auto & cnt : allCounters[rel])
         {
-          Expr cntP = replaceAll(cnt, vars, varsP);
-          for (auto b : bds)
-          {
-            Expr asgn = NULL;
-            if (isOpX<EQ>(b) && b->left() == cntP)
-              asgn = b->right();
-            else if (isOpX<EQ>(b) && b->right() == cntP)
-              asgn = b->left();
-            if (asgn != NULL)
-              init[cnt] = {
-                replaceAll(b, varsP, vars), replaceAll(asgn, varsP, vars)};
-
-            // the rest is useful when an invariant is already found
-            if (isOpX<BULE>(b) && b->left() == cnt)
-              ub = b->right();
-            if (isOpX<BULE>(b) && b->right() == cnt)
-              lb = b->left();
-            if (isOpX<BUGE>(b) && b->left() == cnt)
-              lb = b->right();
-            if (isOpX<BUGE>(b) && b->right() == cnt)
-              ub = b->left();
-          }
-
-          if (lb != NULL && lb == ub)
-            init[cnt] = {
-              replaceAll(mk<EQ>(cnt, lb), varsP, vars),
-              replaceAll(lb, varsP, vars)};
+          ExprSet eqs;
+          getTransitiveEqualities(bds, cnt, eqs);
+          for (auto & e : eqs)
+            if (e != cnt)
+              init[cnt].insert(e);
         }
 
         auto ind = getVarIndex(rel, decls);
@@ -976,36 +956,47 @@ namespace ufo
         for (auto & u : cntbnds[rel])
         {
           auto cnt = u.first;
-          if (init[cnt].first != NULL)
+          for (auto & in : init[cnt])
           {
             auto cand = mk<BULE>(u.second->left(),
               isOpX<BULT>(u.second) ? u.second->right() :
               mk<BADD>(u.second->right(),
                 bvnum(mkMPZ(1, m_efac), typeOf(u.second->right()))));
-            auto cond = replaceAll(u.second, cnt, init[cnt].second);
-            candBlocks.insert({cond, {cand, init[cnt].first}});
+            auto cond = replaceAll(u.second, cnt, in);
+            candBlocks.insert({cond, {cand, mk<EQ>(cnt, in)}});
           }
         }
 
         for (auto & u : ncntbnds[rel])
         {
           auto cnt = u.first;
-          if (init[cnt].first != NULL)
+          for (auto & in : init[cnt])
           {
             auto cand = mk<BUGE>(u.second->left(),
               isOpX<BUGT>(u.second) ? u.second->right() :
               mk<BSUB>(u.second->right(),
                 bvnum(mkMPZ(1, m_efac), typeOf(u.second->right()))));
-            auto cond = replaceAll(u.second, cnt, init[cnt].second);
-            candBlocks.insert({cond, {cand, init[cnt].first}});
+            auto cond = replaceAll(u.second, cnt, in);
+            candBlocks.insert({cond, {cand, mk<EQ>(cnt, in)}});
           }
         }
 
         for (auto & b : candBlocks)
         {
-          addToCandidates(ind, b.second.first, 765);
-          addToCandidates(ind, mk<IMPL>(b.first, b.second.first), 765);
-          addToCandidates(ind, mk<IMPL>(mkNeg(b.first), b.second.second), 765);
+          Expr f = b.first;            // loop condition
+          Expr c = b.second.first;     // candidate
+          Expr g = b.second.second;    // init assignment
+          addToCandidates(ind, c, 763);
+          addToCandidates(ind, mk<IMPL>(f, c), 764);
+          addToCandidates(ind, mk<IMPL>(mkNeg(f), g), 765);
+
+          if (isOpX<BULE>(c) && isOpX<BULT>(f) && c->right() == f->right())
+          {
+            Expr r = mk<BULT>(f->left(), c->left());
+            for (auto & a : ccands[rel][c->left()])
+              addToCandidates(ind, mk<IMPL>(r,
+                replaceAll(a, c->left(), f->left())), 767);
+          }
         }
       }
     }
@@ -1042,7 +1033,7 @@ namespace ufo
                             simpConstArr(
                             simplifyBV(
                             simplifyBool(e))));});
-
+        b = unitPropagate(b);
         b = factor(b, norm); // to elaborate on
         c.body = b;
 

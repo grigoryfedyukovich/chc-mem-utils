@@ -1444,6 +1444,23 @@ namespace ufo
     }
   };
 
+  static Expr unitPropagate (Expr exp)
+  {
+    ExprSet cnjs;
+    getConj(exp, cnjs);
+    auto exp2 = exp;
+    for (auto & a : cnjs)
+    {
+      if (isOpX<FAPP>(a))
+      {
+        exp2 = replaceAll(exp2, a, mk<TRUE>(exp->getFactory()));
+        exp2 = replaceAll(exp2, mkNeg(a), mk<FALSE>(exp->getFactory()));
+        assert(!contains(exp2, a));
+        exp2 = simplifyBool(mk<AND>(exp2, a));
+      }
+    }
+    return exp2;
+  }
 
   static Expr simplifyArr (Expr exp);
 
@@ -1747,14 +1764,16 @@ namespace ufo
   }
 
   // simplification based on boolean replacements
-  template<typename Range> static void constantPropagation(Range& hardVars, ExprSet& cnjs, bool doArithm = false)
+  template<typename Range> static void
+    constantPropagation(Range& hardVars, ExprSet& cnjs, bool doArithm = false)
   {
     ExprMap repls;
     constantPropagationRec(hardVars, cnjs, repls, doArithm);
   }
 
   // simplification based on equivalence classes
-  template<typename Range> static Expr simpEquivClasses(Range& hardVars, ExprSet& cnjs, ExprFactory& efac)
+  template<typename Range> static Expr
+    simpEquivClasses(Range& hardVars, ExprSet& cnjs, ExprFactory& efac)
   {
     set<ExprVector*> equivs;
     Expr res = conjoin(cnjs, efac);
@@ -1820,6 +1839,39 @@ namespace ufo
       return simpEquivClasses(hardVars, cnjs, efac);
     }
     return res;
+  }
+
+  // GF: TODO: merge/make use w/in simpEquivClasses
+  static void getTransitiveEqualities(ExprSet& cnjs, Expr var,
+    ExprSet& eqs, bool in = true)
+  {
+    if (in) eqs = {var};
+    int sz = eqs.size();
+    ExprSet lbs, ubs;
+    for (auto & v : eqs)
+      for (auto b : cnjs)
+        if (isOpX<EQ>(b) && b->left() == v)
+          eqs.insert(b->right());
+        else if (isOpX<EQ>(b) && b->right() == v)
+          eqs.insert(b->left());
+        else if (isOpX<BULE>(b) && b->left() == v)
+          ubs.insert(b->right());
+        else if (isOpX<BULE>(b) && b->right() == v)
+          lbs.insert(b->left());
+        else if (isOpX<BUGE>(b) && b->left() == v)
+          lbs.insert(b->right());
+        else if (isOpX<BUGE>(b) && b->right() == v)
+          ubs.insert(b->left());
+
+    for (auto & lb : lbs)
+      for (auto & ub : ubs)
+        if (lb == ub)
+          eqs.insert(lb);
+
+    if (eqs.size() == sz) return;
+
+    for (auto & v : eqs)
+      getTransitiveEqualities(cnjs, v, eqs, false);
   }
 
   struct SimplifyQuantsExpr
