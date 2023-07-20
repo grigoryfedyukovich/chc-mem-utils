@@ -469,6 +469,7 @@ namespace ufo
                           << " CHCs and " << decls.size() << " declarations\n";
 
       Expr s = op::bv::bvsort (64, m_efac); // hardcode for now
+      Expr z = bvnum(mkMPZ(0, m_efac), s);
 
       if (setEnc)
       {
@@ -494,8 +495,9 @@ namespace ufo
       for (auto it = chcs.begin(); it != chcs.end(); )
       {
         HornRuleExt & hr = *it;
-        bool nonempty = hr.splitBody();
-        if (nonempty && (hr.srcRelation == NULL || addedDecl(hr.srcRelation))) ++it;
+        if (hr.splitBody() &&
+           (hr.srcRelation == NULL || addedDecl(hr.srcRelation)))
+            ++it;
         else
         {
           if (debug > 0)
@@ -546,12 +548,12 @@ namespace ufo
       if (setEnc) resetVars();
       for (auto & hr : chcs)
       {
-        if (debug >= 3)
+        if (debug > 2)
           outs () << "\n\n PROC " << hr.srcRelation << " -> " << hr.dstRelation << "\n";
 
-        ExprSet rlin;
         if (setEnc)
         {
+          ExprSet rlin;
           auto dstVars = invVars[hr.srcRelation];
 
           for (auto & l : hr.lin)
@@ -599,16 +601,12 @@ namespace ufo
 
           if (hr.isFact)
           {
-            Expr cArr = mk<CONST_ARRAY>(s, op::bv::bvnum(mkMPZ(0, m_efac), s));
+            Expr cArr = mk<CONST_ARRAY>(s, z);
             // assume that this fact does not rewrite _alloc
-            rlin.insert(mk<EQ>(allocP, cArr));
-            rlin.insert(mk<EQ>(auxP, cArr));
-            rlin.insert(mk<EQ>(offP, cArr));
-            dstVars.push_back(mem);
-            dstVars.push_back(alloc);
-            dstVars.push_back(aux);
-            dstVars.push_back(off);
-            dstVars.push_back(siz);
+            for (auto & a : {allocP, auxP, offP, sizP})
+              rlin.insert(mk<EQ>(a, cArr));
+            for (auto & a : {mem, alloc, aux, off, siz})
+              dstVars.push_back(a);
           }
 
           if (!hr.isQuery)
@@ -624,7 +622,7 @@ namespace ufo
       findCycles();
 
       // move vars out of mem
-      if (setEnc) moveMemVars(s, names);
+      if (setEnc) moveMemVars(z, names);
 
       if (setEnc) for (auto & r : chcs) r.body = typeRepair(r.body);
 
@@ -639,55 +637,7 @@ namespace ufo
 
       if (setEnc)
       {
-        bool toCont = true;
-        while (toCont)   // propagate
-        {
-          toCont = false;
-          for (auto & hr : chcs)
-          {
-            if (hr.isFact || hr.isQuery) continue;
-
-            for (auto & s : invVars[hr.srcRelation])
-            {
-              bool f = true;
-              for (auto & d : invVars[hr.dstRelation])
-              {
-                if (s == d)
-                {
-                  f = false;
-                  break;
-                }
-              }
-              if (f)
-              {
-                addVar(hr.dstRelation, s);
-                toCont = true;
-              }
-            }
-          }
-        }
-
-        for (auto & hr : chcs)
-        {
-          hr.srcVars = invVars[hr.srcRelation];
-          hr.dstVars = invVarsPrime[hr.dstRelation];
-
-          ExprSet lin;
-          getConj(hr.body, lin);
-
-          if (!hr.isFact && !hr.isQuery)
-          {
-            for (auto & vp : hr.dstVars)
-            {
-              auto v = invVarsMap[hr.dstRelation][vp];
-              if (!contains(hr.writeVars, v))
-                lin.insert(mk<EQ>(vp, v));
-            }
-          }
-
-          hr.body = conjoin(lin, m_efac);
-        }
-
+        fillVars();
         updateDecls();
       }
 
@@ -750,6 +700,64 @@ namespace ufo
         else
           outs () << "  Parsed CHCs:\n";
         print(debug >= 1, true);
+      }
+    }
+
+    void fillVars()
+    {
+      bool toCont = true;
+      while (toCont)   // propagate
+      {
+        toCont = false;
+        for (auto & hr : chcs)
+        {
+          if (hr.isFact || hr.isQuery) continue;
+
+          for (auto & s : invVars[hr.srcRelation])
+          {
+            bool f = true;
+            for (auto & d : invVars[hr.dstRelation])
+            {
+              if (s == d)
+              {
+                f = false;
+                break;
+              }
+            }
+            if (f)
+            {
+              addVar(hr.dstRelation, s);
+              toCont = true;
+            }
+          }
+        }
+      }
+
+      for (auto & hr : chcs)
+      {
+        hr.srcVars = invVars[hr.srcRelation];
+        hr.dstVars = invVarsPrime[hr.dstRelation];
+
+        ExprSet lin;
+        getConj(hr.body, lin);
+
+        if (!hr.isFact && !hr.isQuery)
+        {
+          for (auto & vp : hr.dstVars)
+          {
+            auto v = invVarsMap[hr.dstRelation][vp];
+            if (!contains(hr.writeVars, v))
+              lin.insert(mk<EQ>(vp, v));
+          }
+        }
+
+        hr.body = conjoin(lin, m_efac);
+
+        ExprSet vrs;
+        filter(hr.body, bind::IsConst(), std::inserter (vrs, vrs.begin ()));
+        for (auto & v : vrs)
+          if (!contains(hr.srcVars, v) && !contains(hr.dstVars, v))
+            hr.locVars.push_back(v);
       }
     }
 
@@ -1306,13 +1314,13 @@ namespace ufo
       return false;
     }
 
-    void moveMemVars(Expr s, ExprVector& names)
+    void moveMemVars(Expr z, ExprVector& names)
     {
       ExprSet posvars;
       for (auto & hr : chcs)
       {
         hr.lin.clear();
-        getConj(hr.body, hr.lin);
+        getConj(hr.body, hr.lin); // prepares body conjuncts, all at once
         ExprVector se;
         filter (hr.body, IsSelect (), inserter(se, se.begin()));
         for (auto & s : se)
@@ -1329,58 +1337,82 @@ namespace ufo
           ++it;
       }
 
-      Expr zer = bvnum(mkMPZ(0, m_efac), s);
-      for (auto it = posvars.begin(); it != posvars.end(); ++it)
+      for (auto & v : posvars)
       {
-        int num = lexical_cast<int>((*it)->left());
-        Expr newVar = names[num - 1];
-        Expr newVarPr = cloneVar(newVar,
-           mkTerm<string>(lexical_cast<string>(newVar) + "'", m_efac));
+        Expr newVar = names[lexical_cast<int>(v->left()) - 1],
+             newVarP = cloneVar(newVar,
+                  mkTerm<string>(lexical_cast<string>(newVar) + "'", m_efac));
         for (auto & hr : chcs)
+          moveVarCHC(hr, newVar, newVarP, z, v);
+      }
+
+      // clean after it's done, all at once
+      for (auto & hr : chcs) hr.lin.clear();
+    }
+
+    void moveVarCHC(HornRuleExt& hr, Expr newVar, Expr newVarP, Expr z, Expr v)
+    {
+      if (debug > 2) outs () << "Moving " << newVar << " from memory in " <<
+        hr.srcRelation << " -> " << hr.dstRelation << "\n";
+      bool changed = false;
+      ExprVector toAdd;
+      for (auto it2 = hr.lin.begin(); it2 != hr.lin.end(); )
+      {
+        auto b = *it2, repl = mk<SELECT>(mk<SELECT>(mem, v), z),
+             c = replaceAll(b, repl, newVar);
+        bool repled = b != c;
+        if (repled)
         {
-          bool changed = false;
-          ExprVector toAdd;
-          for (auto it2 = hr.lin.begin(); it2 != hr.lin.end(); )
-          {
-            bool repled = false, varmoved = false;
-            auto b = *it2;
-            auto c = replaceAll(b, mk<SELECT>(mk<SELECT>(mem, *it), zer), newVar);
-            if (b != c) repled = true;
-            if (isOpX<EQ>(c))
-              if (memP == c->left() && isOpX<STORE>(c->right()))
-                if (mem == c->right()->left() && *it == c->right()->right())
-                {
-                  auto l = c->right()->last();
-                  if (isOpX<STORE>(l))
-                    if (isOpX<SELECT>(l->left()) && isZero(l->right()))
-                      if (mem == l->left()->left() && *it == l->left()->right())
-                      {
-                        auto extr = simpextract(typeOf(newVarPr), 0, l->last());
-                        toAdd.push_back(mk<EQ>(newVarPr, extr));
-                        addVar(hr.dstRelation, newVar);
-                        hr.writeVars.insert(newVar);
-                        hr.writeVars.erase(mem);
-                        varmoved = true;
-                      }
-                }
+          if (debug > 2)
+            outs () << "  Replaced:\n    " << repl << "\n";
+          addVar(hr.srcRelation, newVar);
+        }
 
-            if (repled || varmoved)
-              it2 = hr.lin.erase(it2);
-            else
-              ++it2;
-            if (repled && !varmoved)
-              toAdd.push_back(c);
-          }
+        bool varmoved = moveVarEq(hr, c, toAdd, newVar, newVarP, v);
 
-          if (!toAdd.empty())
-            hr.lin.insert(toAdd.begin(), toAdd.end());
+        if (repled || varmoved)
+        {
+          if (debug > 2)
+            outs () << "  Erased from the body:\n    " << *it2 << "\n";
+          it2 = hr.lin.erase(it2);
+        }
+        else
+          ++it2;
+        if (repled && !varmoved)
+          toAdd.push_back(c);
+      }
 
-          hr.body = conjoin(hr.lin, m_efac);
+      if (!toAdd.empty())
+      {
+        hr.lin.insert(toAdd.begin(), toAdd.end());
+        if (debug > 2)
+        {
+          outs () << "  Extra constraints in the body:\n";
+          pprint(toAdd, 4);
         }
       }
 
-      // clean after it's done
-      for (auto & hr : chcs) hr.lin.clear();
+      hr.body = conjoin(hr.lin, m_efac);
+    }
+
+    bool moveVarEq(HornRuleExt& hr, Expr c, ExprVector& toAdd,
+                 Expr newVar, Expr newVarP, Expr pv)
+    {
+      if (!isOpX<EQ>(c)) return false;
+      if (memP != c->left() || !isOpX<STORE>(c->right())) return false;
+      if (mem != c->right()->left() || pv != c->right()->right()) return false;
+
+      auto l = c->right()->last();
+      if (!isOpX<STORE>(l)) return false;
+      if (!isOpX<SELECT>(l->left()) || !isZero(l->right())) return false;
+      if (mem != l->left()->left() || pv != l->left()->right()) return false;
+
+      toAdd.push_back(
+          mk<EQ>(newVarP, simpextract(typeOf(newVarP), 0, l->last())));
+      addVar(hr.dstRelation, newVar);
+      hr.writeVars.insert(newVar);
+      hr.writeVars.erase(mem);
+      return true;
     }
 
     // front-end optimizations: helper methods for `eliminateTransitVars`
