@@ -405,17 +405,18 @@ int fillChecks(SMTUtils& u, Expr l, Expr r,
         }
     }
   }
-  outs () << "total number of equivalnce checks = " << totNum << "\n";
+  outs () << "total number of equivalence checks: " << totNum << "\n";
   return totNum;
 }
 
 void findEquivs(ExprFactory& efac, map<int,set<pair<Expr, Expr>>>& toCheck,
       ExprMap& curRepls1, ExprMap& curRepls2,
       ExprMap& rewrReplsL, ExprMap& rewrReplsR,
-      ExprVector& newdefs, bool toRepl, bool debug)
+      ExprVector& newdefs, bool toRepl, bool debug, int to)
 {
-  SMTUtils u100 (efac, 1000);
+  SMTUtils u100 (efac, to);
   set<pair<Expr, Expr>> checkedPairs;
+  int indets = 0, unsats = 0, sats = 0, skips = 0;
   for (auto & p : toCheck)
   {
     bool doublebreak = false;
@@ -451,7 +452,7 @@ void findEquivs(ExprFactory& efac, map<int,set<pair<Expr, Expr>>>& toCheck,
             outs () << "impl: "; somePrint( replaceAll(c.second, rewrReplsR), 4);
             outs () << "\n";
           }
-
+          skips++;
           checkedPairs.insert(c);
           toSkip = true;
           break;
@@ -460,7 +461,8 @@ void findEquivs(ExprFactory& efac, map<int,set<pair<Expr, Expr>>>& toCheck,
 
       if (toSkip) continue;
 
-      if (false == u100.isSat(mk<NEQ>(e1, e2)))
+      auto res = u100.isSat(mk<NEQ>(e1, e2));
+      if (false == res)
       {
         checkedPairs.insert(c);
         auto r1 = replaceAll(c.first, rewrReplsL), r2 = replaceAll(c.second, rewrReplsR);
@@ -483,10 +485,20 @@ void findEquivs(ExprFactory& efac, map<int,set<pair<Expr, Expr>>>& toCheck,
           curRepls2[c.second] = app;
           newdefs.push_back(mk<EQ>(e1, app));
         }
+        unsats++;
       }
+      else if (res == true)
+        sats++;
+      else
+        indets++;
     }
     if (doublebreak) break;
   }
+  outs () << "intermediate stats on checks:\n " <<
+    "unsat: " << unsats << ", " <<
+    "skipped: " << skips << ", " <<
+    "sat: " << sats << ", " <<
+    "TO: " << indets << "\n";
 }
 
 int main (int argc, char ** argv)
@@ -494,6 +506,7 @@ int main (int argc, char ** argv)
   int debug = getIntValue("--debug", 0, argc, argv);
   int mdls = getIntValue("--mdls", 1, argc, argv);
   int repls = getIntValue("--reuse", 1, argc, argv);
+  int to = getIntValue("--to", 1000, argc, argv);
 
   ExprFactory efac;
   EZ3 z3(efac);
@@ -524,7 +537,7 @@ int main (int argc, char ** argv)
 
   fillChecks(u, l, r, inlsL, inlsR, toCheck, mdls, debug);
   findEquivs(efac, toCheck, curRepls1, curRepls2, rewrReplsL, rewrReplsR,
-        newdefs, repls, debug);
+        newdefs, repls, debug, to);
 
   l = replaceAll(l, curRepls1);
   r = replaceAll(r, curRepls2);
