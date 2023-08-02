@@ -1,6 +1,8 @@
 #ifndef SMTUTILS__HPP__
 #define SMTUTILS__HPP__
 #include <assert.h>
+#include <iostream>
+#include <fstream>
 
 #include "ae/ExprSimpl.hpp"
 #include "ufo/Smt/EZ3.hh"
@@ -27,6 +29,8 @@ namespace ufo
 
     SMTUtils (ExprFactory& _efac, unsigned _to) :
       efac(_efac), z3(efac), smt (z3, _to), can_get_model(0), m(NULL) {}
+
+    static const string filename;
 
     boost::tribool eval(Expr v, ZSolver<EZ3>::Model* m1)
     {
@@ -727,11 +731,28 @@ namespace ufo
       else out << z3.toSmtLib (e);
     }
 
-    void serialize_formula(Expr form)
+    void serialize_formula(Expr e, std::ostream& out = outs())
     {
-      outs() << "(assert ";
-      print (form);
-      outs() << ")\n";
+      out << "(assert ";
+      print (e, out);
+      out << ")\n";
+    }
+
+    void dumpToFile(Expr e)
+    {
+      ofstream outfile;
+      outfile.open (filename + lexical_cast<string>(stat) + ".smt2");
+      outfile << "(set-logic ALL)\n\n";
+      allVars.clear();
+      filter (e, bind::IsConst (), inserter (allVars, allVars.begin()));
+      for (auto & v : allVars)
+        outfile << "(declare-const " << z3.toSmtLib(v)
+               << " " << z3.toSmtLib(typeOf(v)) << ")\n";
+      outfile << "\n";
+      serialize_formula(e, outfile);
+      outfile << "\n(check-sat)\n";
+      outfile.close();
+      stat++;
     }
 
     bool canGetModel()

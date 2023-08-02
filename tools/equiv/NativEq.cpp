@@ -409,10 +409,10 @@ int fillChecks(SMTUtils& u, Expr l, Expr r,
   return totNum;
 }
 
-void findEquivs(ExprFactory& efac, map<int,set<pair<Expr, Expr>>>& toCheck,
+int findEquivs(ExprFactory& efac, map<int,set<pair<Expr, Expr>>>& toCheck,
       ExprMap& curRepls1, ExprMap& curRepls2,
       ExprMap& rewrReplsL, ExprMap& rewrReplsR,
-      ExprVector& newdefs, bool toRepl, bool debug, int to)
+      ExprVector& newdefs, bool toRepl, bool debug, int to, int dump)
 {
   SMTUtils u100 (efac, to);
   set<pair<Expr, Expr>> checkedPairs;
@@ -461,6 +461,12 @@ void findEquivs(ExprFactory& efac, map<int,set<pair<Expr, Expr>>>& toCheck,
 
       if (toSkip) continue;
 
+      if (dump)
+      {
+        u100.dumpToFile(mk<NEQ>(e1, e2));
+        continue;
+      }
+
       auto res = u100.isSat(mk<NEQ>(e1, e2));
       if (false == res)
       {
@@ -499,7 +505,10 @@ void findEquivs(ExprFactory& efac, map<int,set<pair<Expr, Expr>>>& toCheck,
     "skipped: " << skips << ", " <<
     "sat: " << sats << ", " <<
     "TO: " << indets << "\n";
+  return u100.getStat();
 }
+
+const string SMTUtils::filename = "_dump_formula_";
 
 int main (int argc, char ** argv)
 {
@@ -507,6 +516,7 @@ int main (int argc, char ** argv)
   int mdls = getIntValue("--mdls", 1, argc, argv);
   int repls = getIntValue("--reuse", 1, argc, argv);
   int to = getIntValue("--to", 1000, argc, argv);
+  int dump = getIntValue("--dump", 0, argc, argv);
 
   ExprFactory efac;
   EZ3 z3(efac);
@@ -535,9 +545,16 @@ int main (int argc, char ** argv)
   inlineAll(r, qdefs, rewrReplsR);
   auto inlsR = inls;
 
-  fillChecks(u, l, r, inlsL, inlsR, toCheck, mdls, debug);
-  findEquivs(efac, toCheck, curRepls1, curRepls2, rewrReplsL, rewrReplsR,
-        newdefs, repls, debug, to);
+  int st1 = fillChecks(u, l, r, inlsL, inlsR, toCheck, mdls, debug);
+  int st2 = findEquivs(efac, toCheck, curRepls1, curRepls2, rewrReplsL,
+    rewrReplsR, newdefs, repls, debug, to, dump);
+  if (dump)
+  {
+    assert (st1 == st2);
+    outs () << " dumped to " << st1
+            << " files\nrun `ls -lt " << SMTUtils::filename << "*.smt2`\n";
+    exit(0);
+  }
 
   l = replaceAll(l, curRepls1);
   r = replaceAll(r, curRepls2);
