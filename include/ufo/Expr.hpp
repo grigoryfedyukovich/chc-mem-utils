@@ -3020,13 +3020,24 @@ namespace expr
   }
 
   // pairwise replacing
-  inline Expr replaceAll (Expr exp, ExprMap& m, int bnd = 10)
+
+  inline Expr replaceAll (Expr exp, ExprMap& m, int bnd, int init_bnd)
   {
     if (m.empty()) return exp;
     RAVALLM rav(&m);
     Expr tmp = dagVisit (rav, exp);
-    if (bnd == 0 || tmp == exp) return tmp;
-    else return replaceAll(tmp, m, bnd - 1);
+    if (bnd == 0 || tmp == exp)
+    {
+      if (bnd == 0 && init_bnd > 0)
+        std::cerr  << "Hit a bnd (" << init_bnd << "); possibly ERR\n";
+      return tmp;
+    }
+    else return replaceAll(tmp, m, bnd - 1, init_bnd);
+  }
+
+  inline Expr replaceAll (Expr exp, ExprMap& m, int bnd = 10)
+  {
+    return replaceAll(exp, m, bnd, bnd);
   }
 
   // pairwise replacing
