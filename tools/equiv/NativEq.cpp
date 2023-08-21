@@ -149,6 +149,39 @@ inline static void sortedInsert(Expr e1, Expr e2)
   inlsOrder.insert(inlsOrder.begin() + i, {e1, e2});
 }
 
+struct Comm
+{
+  map<Expr, int>& occs;
+  ExprVector& ord;
+  Comm(map<Expr, int>& _occs, ExprVector& _ord) : occs(_occs), ord(_ord) {};
+
+  Expr operator() (Expr exp)
+  {
+    if (isOp<BvOp>(exp) || isOp<BoolOp>(exp) || isOp<ComparissonOp>(exp)
+             || isOp<NumericOp>(exp) || isOpX<FAPP>(exp))
+    {
+      for (int i = 0; i < exp->arity(); i++)
+      {
+        Expr arg = exp->arg(i);
+        if (isOp<BvOp>(arg) || (isOp<BoolOp>(arg) && arg->arity() > 0) ||
+            isOp<ComparissonOp>(arg) || isOp<NumericOp>(arg) ||
+            (isOpX<FAPP>(arg) && arg->arity() > 1))
+        {
+          occs[arg]++;
+          unique_push_back(arg, ord);
+        }
+      }
+    }
+    return exp;
+  }
+};
+
+Expr findComms (Expr exp, map<Expr, int>& occs, ExprVector& ord)
+{
+  ufo::RW<Comm> rw(new Comm(occs, ord));
+  return dagVisit (rw, exp);
+}
+
 struct Inl
 {
   map<Expr, pair<Expr, ExprVector>>& qdefs;
@@ -245,6 +278,53 @@ bool parse(Expr a, Expr& l, Expr& r, ExprMap& defs,
     }
   }
   return l != NULL;
+}
+
+void dumpDefs(map<Expr, pair<Expr, ExprVector>>& qdefs, SMTUtils& u, std::ostream& out)
+{
+  ExprSet written;
+  bool any = true;
+  while (any)
+  {
+    any = false;
+    for (auto & a : qdefs)     // find leaves first
+    {
+      assert(isOpX<FAPP>(a.first));
+      Expr decl = a.first->left();
+      if (contains(written, decl)) continue;
+
+      ExprSet t;
+      getSubterms<FAPP>(a.second.first, t);
+      bool found = false;
+      for (auto & b : t)
+      {
+        if (b->arity() == 1) continue;
+        if (!contains(written, b->left()))
+        {
+          found = true;
+          break;
+        }
+      }
+      if (found) continue;
+      out << "(define-fun " << decl->left() << " (";
+
+      for (int i = 0; i < a.second.second.size(); i++)
+      {
+        auto b = a.second.second[i];
+        out << "(" << b << " ";
+        u.print(typeOf(b), out);
+        out << ")";
+        if (i + 1 < a.second.second.size()) out << " ";
+      }
+      out << ") ";
+      u.print(typeOf(a.first), out);
+      out << "\n  ";
+      u.print(a.second.first, out);
+      out << ")\n\n";
+      written.insert(decl);
+      any = true;
+    }
+  }
 }
 
 void inlineDefs(ExprFactory& efac,
@@ -464,7 +544,7 @@ Expr prepareSubsts (vector<pair<Expr, Expr>>& inlsOrder,
   return replaceAllRev(repl, funrepl);
 }
 
-int findEquivs(ExprFactory& efac,
+int findEquivs(SMTUtils& u100,
       vector<pair<Expr, Expr>>& inlsOrderL,
       vector<pair<Expr, Expr>>& inlsOrderR,
       map<int,set<pair<Expr, Expr>>>& toCheck,
@@ -473,7 +553,6 @@ int findEquivs(ExprFactory& efac,
       ExprVector& newdefs, ExprMap funrepl,
       int batch, bool toRepl, bool debug, int to, int dump)
 {
-  SMTUtils u100 (efac, to);
   set<pair<Expr, Expr>> checked;
   int indets = 0, unsats = 0, sats = 0, skips = 0, oldIndets = 0;
   bool doublebreak = false;
@@ -481,14 +560,49 @@ int findEquivs(ExprFactory& efac,
   {
     for (auto & c : p.second)
     {
+      if (dump)
+      {
+        Expr fla = mk<NEQ>(
+          prepareSubsts(inlsOrderL, funrepl, c.first),
+          prepareSubsts(inlsOrderR, funrepl, c.second));
+        map<Expr, int> comms;
+        ExprVector ord;
+        findComms(fla, comms, ord);
+        int cnt = 0;
+        ExprMap curRepls;
+
+        for (auto rit = ord.rbegin(); rit != ord.rend(); ++rit)
+        {
+          Expr subexp = *rit; // begin with larger subexpressions
+          if (comms[subexp] <= 1 && !isOpX<FAPP>(subexp)) continue;
+          cnt++;
+          if (debug)
+            assert(replaceAll(subexp, curRepls, cnt) == subexp);
+          auto var = mkConst(
+            mkTerm<string>("subexp_" + lexical_cast<string>(cnt++),
+            fla->getFactory()), typeOf(subexp));
+
+          curRepls[subexp] = var;
+          fla = mk<AND>(
+            replaceAll(fla, subexp, var), mk<EQ>(var, subexp));
+        }
+        ExprSet all;
+        getConj(fla, all);
+        auto name = u100.dumpToFile(all);
+        if (debug)
+        {
+          EZ3 z3(fla->getFactory());
+          z3_from_smtlib_file (z3, name.c_str());
+          // should print Z3 parsing errors, if any
+        }
+        outs() << ".";
+        outs().flush();
+        continue;
+      }
+
       if (containsPair(checked, c)) continue;
       Expr e1 = toRepl ? replaceAll(c.first, curRepls1, 0) : c.first;
       Expr e2 = toRepl ? replaceAll(c.second, curRepls2, 0) : c.second;
-      if (dump)
-      {
-        u100.dumpToFile(mk<NEQ>(e1, e2));
-        continue;
-      }
 
       tribool res = true, skipped = false;
 
@@ -575,7 +689,7 @@ int main (int argc, char ** argv)
 
   ExprFactory efac;
   EZ3 z3(efac);
-  SMTUtils u (efac, to*1000);
+  SMTUtils u (efac, to*1000), u100 (efac, to);
   Expr a = z3_from_smtlib_file (z3, argv [1]), l = NULL, r = NULL;
   ExprVector newdefs;
   ExprSet leaves;
@@ -587,6 +701,13 @@ int main (int argc, char ** argv)
   {
     errs() << "Incompatible input format\n";
     return 0;
+  }
+
+  if (dump)
+  {
+    stringstream ss;
+    dumpDefs(qdefs, u, ss);
+    u100.setCommonDefs(ss.str());
   }
 
   inlineDefs(efac, qdefs, leaves, qdefsLeaves, funrepl);
@@ -603,11 +724,10 @@ int main (int argc, char ** argv)
   auto inlsOrderR = inlsOrder;
 
   int st1 = fillChecks(u, l, r, inlsL, inlsR, toCheck, mdls, inlDist, debug);
-  int st2 = findEquivs(efac, inlsOrderL, inlsOrder, toCheck, curRepls1, curRepls2,
+  int st2 = findEquivs(u100, inlsOrderL, inlsOrder, toCheck, curRepls1, curRepls2,
     rewrReplsL, rewrReplsR, newdefs, funrepl, batch, repls, debug, to, dump);
   if (dump)
   {
-    assert (st1 == st2);
     outs () << " dumped to " << st1
             << " files\nrun `ls -lt " << SMTUtils::filename << "*.smt2`\n";
     exit(0);

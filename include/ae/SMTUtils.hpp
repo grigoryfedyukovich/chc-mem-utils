@@ -21,6 +21,7 @@ namespace ufo
     bool can_get_model;
     ZSolver<EZ3>::Model* m;
     int stat = 0;
+    string commonDefs;
 
   public:
 
@@ -31,6 +32,11 @@ namespace ufo
       efac(_efac), z3(efac), smt (z3, _to), can_get_model(0), m(NULL) {}
 
     static const string filename;
+
+    void setCommonDefs(string _commonDefs)
+    {
+      commonDefs = _commonDefs;
+    }
 
     boost::tribool eval(Expr v, ZSolver<EZ3>::Model* m1)
     {
@@ -326,7 +332,7 @@ namespace ufo
       getITEs(ex, ites);
       bool did = false;
 
-      Expr freshVar = boolConst(mkTerm<string> ("_nonexnam", ex->getFactory()));
+      Expr freshVar = boolConst(mkTerm<string>("_nonexnam", ex->getFactory()));
 
       for (auto it = ites.begin(); it != ites.end();)
       {
@@ -384,7 +390,7 @@ namespace ufo
 
         else {
           // workaround for arrays or complicated expressions
-          Expr new_name = mkTerm<string> ("subst", cnj->getFactory());
+          Expr new_name = mkTerm<string>("subst", cnj->getFactory());
           Expr new_conj = bind::boolConst(new_name);
           Expr tmp = replaceAll(newConj, cnj, new_conj);
           if (implies (tmp, new_conj)) {
@@ -704,20 +710,6 @@ namespace ufo
         }
         out << ")";
       }
-      else if (isOpX<IMPL>(e) || isOp<ComparissonOp>(e))
-      {
-        if (isOpX<IMPL>(e)) out << "(=> ";
-        if (isOpX<EQ>(e)) out << "(= ";
-        if (isOpX<GEQ>(e)) out << "(>= ";
-        if (isOpX<LEQ>(e)) out << "(<= ";
-        if (isOpX<LT>(e)) out << "(< ";
-        if (isOpX<GT>(e)) out << "(> ";
-        if (isOpX<NEQ>(e)) out << "(distinct ";
-        print(e->left(), out);
-        out << " ";
-        print(e->right(), out);
-        out << ")";
-      }
       else if (isOpX<ITE>(e))
       {
         out << "(ite ";
@@ -727,6 +719,92 @@ namespace ufo
         out << " ";
         print(e->last(), out);
         out << ")";
+      }
+      else if (isOpX<BZEXT>(e) || isOpX<BSEXT>(e))
+      {
+        out << (isOpX<BZEXT>(e) ? "((_ zero_extend " : "((_ sign_extend ")
+            << (width(e->last()) - width(typeOf(e->left()))) << ") ";
+        print(e->left(), out);
+        out << ")";
+      }
+      else if (isOpX<BROTATE_LEFT> (e) || isOpX<BROTATE_RIGHT> (e))
+      {
+        out << (isOpX<BROTATE_LEFT> (e) ?
+          "((_ rotate_left " : "((_ rotate_right ") << high (e) << ") ";
+        print(earg(e), out);
+        out << ")";
+      }
+      else if (isOpX<BEXTRACT>(e))
+      {
+        out << "((_ extract " << high(e) << " " << low(e) << ") ";
+        print(e->last(), out);
+        out << ")";
+      }
+      else if ((isOpX<FAPP>(e) || isOpX<BADD>(e)) && e->arity() > 1)
+      {
+        if (isOpX<FAPP>(e))
+          out << "(" << e->left()->left();
+        else
+          out << "(bvadd";
+        for (int i = (isOpX<FAPP>(e) ? 1 : 0); i < e->arity(); i++)
+        {
+          out << " ";
+          print(e->arg(i), out);
+        }
+        out << ")";
+      }
+      else if (e->arity() == 2)
+      {
+        bool supported = true;
+        if (isOpX<IMPL>(e)) out << "(=> ";
+        else if (isOpX<EQ>(e)) out << "(= ";
+        else if (isOpX<GEQ>(e)) out << "(>= ";
+        else if (isOpX<LEQ>(e)) out << "(<= ";
+        else if (isOpX<LT>(e)) out << "(< ";
+        else if (isOpX<GT>(e)) out << "(> ";
+        else if (isOpX<NEQ>(e)) out << "(distinct ";
+        else if (isOpX<IMPL>(e)) out << "(=> ";
+        else if (isOpX<IFF>(e)) out << "(= ";
+        else if (isOpX<XOR>(e)) out << "(xor ";
+        else if (isOpX<PLUS>(e)) out << "(+ ";
+        else if (isOpX<MINUS>(e)) out << "(- ";
+        else if (isOpX<MULT>(e)) out << "(* ";
+        else if (isOpX<DIV>(e)) out << "(div ";
+        else if (isOpX<IDIV>(e)) out << "(idiv ";
+        else if (isOpX<MOD>(e)) out << "(mod ";
+        else if (isOpX<REM>(e)) out << "(mod ";
+        else if (isOpX<SELECT>(e)) out << "(select ";
+        else if (isOpX<BAND>(e)) out << "(bvand ";
+        else if (isOpX<BOR>(e)) out << "(bvor ";
+        else if (isOpX<BMUL>(e)) out << "(bvmul ";
+        else if (isOpX<BSUB>(e)) out << "(bvsub ";
+        else if (isOpX<BSDIV>(e)) out << "(bvsdiv ";
+        else if (isOpX<BUDIV>(e)) out << "(bvudiv ";
+        else if (isOpX<BSREM>(e)) out << "(bvsrem ";
+        else if (isOpX<BUREM>(e)) out << "(bvurem ";
+        else if (isOpX<BSMOD>(e)) out << "(bvsmod ";
+        else if (isOpX<BULE>(e)) out << "(bvule ";
+        else if (isOpX<BSLE>(e)) out << "(bvsle ";
+        else if (isOpX<BUGE>(e)) out << "(bvuge ";
+        else if (isOpX<BSGE>(e)) out << "(bvsge ";
+        else if (isOpX<BULT>(e)) out << "(bvult ";
+        else if (isOpX<BSLT>(e)) out << "(bvslt ";
+        else if (isOpX<BUGT>(e)) out << "(bvugt ";
+        else if (isOpX<BSGT>(e)) out << "(bvsgt ";
+        else if (isOpX<BXOR>(e)) out << "(bvxor ";
+        else if (isOpX<BSHL>(e)) out << "(bvshl ";
+        else if (isOpX<BLSHR>(e)) out << "(bvlshr ";
+        else if (isOpX<BASHR>(e)) out << "(bvashr ";
+        else if (isOpX<BCONCAT>(e)) out << "(concat ";
+        else supported = false;
+        if (supported)
+        {
+          print(e->left(), out);
+          out << " ";
+          print(e->right(), out);
+          out << ")";
+        }
+        else out << z3.toSmtLib (e);
       }
       else out << z3.toSmtLib (e);
     }
@@ -738,21 +816,33 @@ namespace ufo
       out << ")\n";
     }
 
-    void dumpToFile(Expr e)
+    template <typename T> string dumpToFile(T& e)
     {
       ofstream outfile;
-      outfile.open (filename + lexical_cast<string>(stat) + ".smt2");
+      string name = filename + lexical_cast<string>(stat) + ".smt2";
+      outfile.open (name);
       outfile << "(set-logic ALL)\n\n";
       allVars.clear();
-      filter (e, bind::IsConst (), inserter (allVars, allVars.begin()));
+      filter (conjoin(e, efac), bind::IsConst (),
+        inserter (allVars, allVars.begin()));
       for (auto & v : allVars)
         outfile << "(declare-const " << z3.toSmtLib(v)
                << " " << z3.toSmtLib(typeOf(v)) << ")\n";
       outfile << "\n";
-      serialize_formula(e, outfile);
+      outfile << commonDefs;
+      ExprSet diseqs;
+      for (auto & a : e)
+        if (isOpX<NEQ>(a))
+          diseqs.insert(a);
+        else
+          serialize_formula(a, outfile);
+      outfile << "\n";
+      for (auto & a : diseqs)
+        serialize_formula(a, outfile);
       outfile << "\n(check-sat)\n";
       outfile.close();
       stat++;
+      return name;
     }
 
     bool canGetModel()
@@ -782,7 +872,7 @@ namespace ufo
     for (auto &var: sharedVars) {
       sharedTypes.push_back (bind::typeOf (var));
     }
-    sharedTypes.push_back (mk<BOOL_TY> (efac));
+    sharedTypes.push_back (mk<BOOL_TY>(efac));
 
     // fixed-point object
     ZFixedPoint<EZ3> fp (z3);
@@ -793,16 +883,16 @@ namespace ufo
     params.set (":xform.inline-eager", false);
     fp.set (params);
 
-    Expr errRel = bind::boolConstDecl(mkTerm<string> ("err", efac));
+    Expr errRel = bind::boolConstDecl(mkTerm<string>("err", efac));
     fp.registerRelation(errRel);
     Expr errApp = bind::fapp (errRel);
 
-    Expr itpRel = bind::fdecl (mkTerm<string> ("itp", efac), sharedTypes);
+    Expr itpRel = bind::fdecl (mkTerm<string>("itp", efac), sharedTypes);
     fp.registerRelation (itpRel);
     Expr itpApp = bind::fapp (itpRel, sharedVars);
 
     fp.addRule(allVars, boolop::limp (A, itpApp));
-    fp.addRule(allVars, boolop::limp (mk<AND> (B, itpApp), errApp));
+    fp.addRule(allVars, boolop::limp (mk<AND>(B, itpApp), errApp));
 
     tribool res;
     try {

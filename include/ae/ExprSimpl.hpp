@@ -4861,6 +4861,13 @@ namespace ufo
     }
   }
 
+  template<typename Op> static void getSubterms(Expr e, ExprSet& t)
+  {
+    if (isOpX<Op>(e)) t.insert(e);
+    for (unsigned i = 0; i < e->arity(); i++)
+      getSubterms<Op>(e->arg(i), t);
+  }
+
   void pprint(ExprMap & e)
   {
     for (auto & a : e)
