@@ -88,7 +88,7 @@ int main (int argc, char ** argv)
   int norm = getIntValue(OPT_NORM, 0, argc, argv);
   int prj = getIntValue(OPT_PRJ, 3, argc, argv);
   bool opt = getBoolValue(OPT_OPT, false, argc, argv);
-  int to = getIntValue(OPT_TO, (cnt >= 2) ? 20000 : 700, argc, argv);
+  int to = getIntValue(OPT_TO, 1000, argc, argv);
 
   //get names
   const string pref("; var_id: ");

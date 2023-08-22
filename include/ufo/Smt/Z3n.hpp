@@ -540,7 +540,12 @@ namespace ufo
 
     ZSolver (Z &z, unsigned to) :
     z3(z), ctx (z.get_ctx ()), solver (z.get_ctx ()), efac (z.get_efac ()) {
-      ZParams<Z> p(z);
+      setTo(to);
+    }
+
+    void setTo (unsigned to)
+    {
+      ZParams<Z> p(z3);
       p.set("timeout", to);
       solver.set(p);
     }

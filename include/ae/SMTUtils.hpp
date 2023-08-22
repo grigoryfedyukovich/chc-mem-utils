@@ -18,7 +18,7 @@ namespace ufo
     ZSolver<EZ3> smt;
     bool can_get_model;
     ZSolver<EZ3>::Model* m;
-    int stat = 0;
+    unsigned stat = 0, to, inc;
 
   public:
 
@@ -26,7 +26,15 @@ namespace ufo
       efac(_efac), z3(efac), smt (z3), can_get_model(0), m(NULL) {}
 
     SMTUtils (ExprFactory& _efac, unsigned _to) :
-      efac(_efac), z3(efac), smt (z3, _to), can_get_model(0), m(NULL) {}
+      efac(_efac), z3(efac), smt (z3, _to),
+      to(_to), inc(to/10), can_get_model(0), m(NULL) {}
+
+    void extendTo ()
+    {
+      to += inc;
+      smt.reset();
+      smt.setTo(to);
+    }
 
     boost::tribool eval(Expr v, ZSolver<EZ3>::Model* m1)
     {
@@ -115,6 +123,7 @@ namespace ufo
       }
       boost::tribool res = smt.solve ();
       can_get_model = res ? true : false;
+      if (indeterminate (res)) extendTo();
       return res;
     }
 
