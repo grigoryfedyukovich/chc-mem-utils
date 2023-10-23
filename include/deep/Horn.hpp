@@ -154,6 +154,7 @@ namespace ufo
     map<int, ExprSet> notused, singused;
     ExprSet tranRemoved;
     set<int> tranShrinked;
+    ExprVector scalarInds;
 
     CHCs(ExprFactory &efac, EZ3 &z3, bool _mems = false, int d = false) :
       u(efac), m_efac(efac), m_z3(z3), mems(_mems), hasAnyArrays(false), debug(d) {};
@@ -353,6 +354,7 @@ namespace ufo
         else ++it;
       }
 
+      ExprSet objNames;
       for (auto &r: fp.m_rules)
       {
         int chcNum = chcs.size();
@@ -400,6 +402,8 @@ namespace ufo
         else
           hr.body = r;
 
+        findObjectNames (hr.body, objNames);
+
         if (lexical_cast<string>(hr.body).find("element-address") != string::npos)
           continue;
 
@@ -425,6 +429,9 @@ namespace ufo
           }
         }
       }
+
+      ExprVector names;
+      for (auto & a : objNames) names.push_back(a);
 
       for (auto & hr : chcs)
       {
@@ -468,7 +475,7 @@ namespace ufo
       if (debug > 0) outs () << "Reserved space for " << chcs.size()
                           << " CHCs and " << decls.size() << " declarations\n";
 
-      Expr s = op::bv::bvsort (64, m_efac); // hardcode for now
+      Expr s = bvsort (64, m_efac); // hardcode for now
       Expr z = bvnum(mkMPZ(0, m_efac), s);
 
       if (setEnc)
@@ -543,8 +550,6 @@ namespace ufo
         outs () << "Vacuity elimination (1): " << sz << " -> " << chcs.size() << "\n";
 
       // set encoding is here
-      ExprVector names;
-
       if (setEnc) resetVars();
       for (auto & hr : chcs)
       {
@@ -623,6 +628,14 @@ namespace ufo
 
       // move vars out of mem
       if (setEnc) moveMemVars(z, names);
+
+      for (auto & ind : scalarInds) // cleaning after vars are moved
+        for (auto & r : chcs)
+          r.body = fixpointRewrite(
+            replaceAll(r.body, mk<SELECT>(alloc, ind), z),
+              [](Expr e){ return
+                simplifyBool(
+                simplifyBV(e));});
 
       if (setEnc) for (auto & r : chcs) r.body = typeRepair(r.body);
 
@@ -785,8 +798,12 @@ namespace ufo
         filter (hr.body, IsStore (), inserter(selstors, selstors.begin()));
         for (auto & s : selstors)
           if (isOpX<SELECT>(s->left()) && mem == s->left()->left())
+          {
+            assert(isOpX<SELECT>(s->left()->right()) &&
+                   s->left()->right()->left() == alloc);
             checks.insert(mk<BULT>(s->right(),
-              mk<SELECT>(siz, mk<SELECT>(alloc, s->left()->right()))));
+                   mk<SELECT>(siz, s->left()->right())));
+          }
 
         for (auto & c : checks)
         {
@@ -1342,6 +1359,7 @@ namespace ufo
         Expr newVar = names[lexical_cast<int>(v->left()) - 1],
              newVarP = cloneVar(newVar,
                   mkTerm<string>(lexical_cast<string>(newVar) + "'", m_efac));
+        scalarInds.push_back(v);
         for (auto & hr : chcs)
           moveVarCHC(hr, newVar, newVarP, z, v);
       }

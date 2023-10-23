@@ -18,7 +18,7 @@ namespace ufo
         false, true, false, 0, false, false, to, debug), varIds(v){}
 
     map<Expr, int> allocMap, offMap, sizMap, memMap;
-    map<Expr, ExprSet> allocVals;
+    map<Expr, ExprSet> allocVals, aliasesInval;
     map<Expr, map<Expr, ExprSet>> aliases, aliasesRev;
     map<Expr, ExprMap> arrVars, arrVarsPr;
     Expr memTy, allocTy, zeralloc;
@@ -333,10 +333,11 @@ namespace ufo
       if (found) propagateAliases(ptr);
     }
 
+    map<int, ExprVector> aliasCandidates;
     // Houdini-based method to find all alloca values
     // for each relation: create a candidate \forall key, alloc[key] = 0
     // check inductive: for each cti: extract new model
-    //    and update cand to \forall key, (alloc[key] = 0 \/ alloc[key] = model)
+    //      and update cand to \forall key, (alloc[key] = 0 \/ alloc[key] = mdl)
     void getAllocaVals()
     {
       propagateAllocVals();
@@ -345,8 +346,6 @@ namespace ufo
       for (int ind = 0; ind < decls.size(); ind++)
       {
         Expr decl = decls[ind];
-        if (printLog >= 6) outs () << "getAllocaVals, decl " << decl
-                                   << ", ind = "<< ind << "\n";
         candidates[ind] = {getAllocCand(decl)};
         if (printLog >= 6)
         {
@@ -379,7 +378,7 @@ namespace ufo
       }
     }
 
-    // Houdini-based method to find all aliases of ptr
+    // Houdini-based method to find all aliases of memory region ptr
     // for each relation: create a candidate:
     //     \forall key, alloc[key] = ptr => false
     // check inductive: for each cti: extract new model and update cand to:
@@ -390,10 +389,8 @@ namespace ufo
       for (int ind = 0; ind < decls.size(); ind++)
       {
         Expr decl = decls[ind];
-        if (printLog >= 6) outs () << "\ngetAliases, decl " << decl
-                                   << ", ind = "<< ind << "\n";
-
-        candidates[ind] = {getAliasCand(decl, ptr)};
+        candidates[ind] = aliasCandidates[ind];
+        candidates[ind].push_back(getAliasCand(decl, ptr));
 
         if (printLog >= 6)
         {
@@ -415,27 +412,90 @@ namespace ufo
         ExprVector st;
         filter (mdl, IsStore (), inserter(st, st.begin()));
         for (auto & m : st)
-          if (is_bvnum(m->right()) && m->last() == ptr)
+        {
+          auto val = m->right();
+          if (is_bvnum(val) && m->last() == ptr)
           {
-            if (printLog >= 6) outs () << "  adding val " << m->right() << "\n";
-            aliases[lastDecl][ptr].insert(m->right());
-            aliasesRev[lastDecl][m->right()].insert(ptr);
+            if (printLog >= 6) outs () << "  adding val " << val << "\n";
+            aliases[lastDecl][ptr].insert(val);
+            aliasesRev[lastDecl][val].insert(ptr);
           }
+        }
         getAliases(ptr);
       }
     }
 
     void getAliases()
     {
-      ExprSet all;
+      map<Expr, map<Expr, ExprSet>> aliasesHard, aliasesRevHard;
+      ExprSet all, ptrs;
       for (auto & d : decls)
         for (auto & val : allocVals[d])
           if (lexical_cast<string>(toMpz(val)) != "0")
             all.insert(val);
-      for (auto & a : all)
+
+      bool foundAny;
+      for (int cycl = 0; true; cycl++)
       {
-        if (printLog >= 2) outs () << "\naliases for " << a << "\n";
-        getAliases(a);
+        map<int, ExprVector> candidatesTmp;
+        for (auto & ptr : all)
+        {
+          if (printLog >= 2)
+            outs () << "\naliases [" << cycl << "] for " << ptr << "\n";
+
+          getAliases(ptr);         // writes down to `candidates`
+          aliasCandidates = candidates;
+          for (int ind = 0; ind < decls.size(); ind++)
+          {
+            Expr decl = decls[ind];
+            auto & v = ruleManager.invVars[decl][allocMap[decl]];
+            for (auto & k : ptrs)
+              if (!contains(aliases[decl][ptr], k))
+                candidatesTmp[ind].push_back(mk<EQ>(mk<SELECT>(v, k), zeralloc));
+
+            for (auto & k : aliases[decl][ptr])
+              if (!contains(aliasesHard[decl][ptr], k))
+                candidatesTmp[ind].push_back(mk<EQ>(mk<SELECT>(v, k), ptr));
+          }
+        }
+
+        for (auto & a : candidatesTmp)
+          for (auto & b : a.second)
+            unique_push_back(b, candidates[a.first]);
+
+        multiHoudini(ruleManager.allCHCs);
+        assignPrioritiesForLearned(false);
+
+        foundAny = false;
+        for (int ind = 0; ind < decls.size(); ind++)
+        {
+          Expr decl = decls[ind];
+          for (auto c : candidates[ind]) // proved already
+          {
+            if (isOpX<EQ>(c))
+            {
+              Expr l = c->left(), r = c->right(), lr = l->right();
+              if (isZero(r)) // invalid alias
+                aliasesInval[decl].insert(lr);
+              else           // proved (valid) alias
+              {
+                int sz1 = aliasesRevHard[decl][lr].size(),
+                    sz2 = aliasesHard[decl][r].size();
+
+                aliasesRevHard[decl][lr].insert(r);
+                aliasesHard[decl][r].insert(lr);
+                ptrs.insert(lr);
+
+                foundAny |= (sz1 < aliasesRevHard[decl][lr].size()) ||
+                            (sz2 < aliasesHard[decl][r].size());
+              }
+            }
+          }
+        }
+        auto aTmp = aliases, aRevTmp = aliasesRev;
+        if (!foundAny) break;
+        aliases = aliasesHard;
+        aliasesRev = aliasesRevHard;
       }
     }
 
@@ -460,30 +520,24 @@ namespace ufo
     }
 
     ExprSet allArrVars, allArrVarsPr;
-
     void addAliasVars()
     {
       if (printLog)
       {
-        ExprSet aa, ab;
+        ExprSet memregs, ptrs;
         for (auto & d : decls)
-        {
           for (auto & al : aliases[d])
           {
-            aa.insert(al.first);
-
-            for (auto & a : al.second)
-            {
-              ab.insert(a);
-            }
+            memregs.insert(al.first);
+            ptrs.insert(al.second.begin(), al.second.end());
           }
-        }
-        outs () << "Detected memory regions: " << aa.size() <<
-                   ", aliases: " << ab.size() << ",\n";
+        outs () << "Detected memory regions: " << memregs.size() <<
+                   ", aliases: " << ptrs.size() << ",\n";
         outs () << "memory regions:\n";
-        pprint(aa, 2);
+        pprint(memregs, 2);
         outs () << "aliases:\n";
-        pprint(ab, 2);
+        pprint(ptrs, 2);
+        printAliases();
       }
 
       for (int ind = 0; ind < decls.size(); ind++)
@@ -499,8 +553,7 @@ namespace ufo
           arrVars[d][al.first] = a;
           arrVarsPr[d][al.first] = b;
           invarVars[ind][
-            ruleManager.invVars[d].size() - 1 +
-            arrVars[d].size()] = a;
+            ruleManager.invVars[d].size() - 1 + arrVars[d].size()] = a;
         }
       }
     }
@@ -523,6 +576,56 @@ namespace ufo
       return upd;
     }
 
+    struct AliasRewrite
+    {
+      map<Expr, ExprSet>& als;
+      ExprSet& inval;
+      Expr allocVar;
+      AliasRewrite(map<Expr, ExprSet>& _als, ExprSet& _inval, Expr _v) :
+        als(_als), inval(_inval), allocVar(_v) {};
+
+      Expr operator() (Expr e)
+      {
+        if (isOpX<NEQ>(e))
+        {
+          Expr sel = NULL, mreg = NULL;
+          for (auto a : (vector<pair<Expr, Expr>>)
+                        {{e->left(), e->right()}, {e->right(), e->left()}})
+          {
+            if (isOpX<SELECT>(a.first) && a.first->left() == allocVar)
+            {
+              sel = a.first;
+              mreg = a.second;
+              break;
+            }
+          }
+          if (sel != NULL)
+          {
+            bool found = false;
+            for (auto & al : als)
+              if (al.first == mreg)
+                found = true;
+            if (!found)
+              return mk<TRUE>(e->getFactory());
+            for (auto & al : inval)
+              if (al == sel->right())
+              {
+                assert(!isZero(mreg));
+                return mk<TRUE>(e->getFactory());
+              }
+          }
+        }
+        return e;
+      }
+    };
+
+    Expr rewriteMemRegs (Expr exp, map<Expr, ExprSet>& als,
+      ExprSet& inval, Expr allocVar)
+    {
+      ufo::RW<AliasRewrite> rw(new AliasRewrite(als, inval, allocVar));
+      return dagVisit (rw, exp);
+    }
+
     void getAliasCombs (Expr body, Expr rel, Expr allocVar,
         vector<ExprMap> & aliasCombs)
     {
@@ -537,7 +640,7 @@ namespace ufo
           regions = aliasesRev[rel][s->last()];
         else
           for (auto & val : allocVals[rel])
-            if (lexical_cast<string>(toMpz(val)) != "0")
+            if (!isZero(val))
               regions.insert(val);
 
         if (regions.empty()) continue;
@@ -594,8 +697,6 @@ namespace ufo
     //  - conjoin all "conditional" bodies after such replacements
     Expr rewriteMemToArr (HornRuleExt& r, ExprMap& m, Expr body)
     {
-      outs () << "rewriteMemToArr: "
-              << r.srcRelation << " -> " << r.dstRelation << "\n";
       // this aux method assumes `r` is not a fact
       ExprVector newConstrs;
       Expr rel = r.srcRelation, memVar = r.srcVars[memMap[rel]];
@@ -675,16 +776,20 @@ namespace ufo
         assert(!contains(body, memTy));
         return;
       }
-      body = fixpointRewrite(body,
-        [](Expr e){return simplifyBool(simplifyArr(simplifyBV(e)));});
 
       if (printLog >= 8) pprint(body, 3);
 
+      // simplify w.r.t. detected memregs
+      Expr rel = r.srcRelation, memVar = r.srcVars[memMap[rel]],
+           allVar = r.srcVars[allocMap[rel]];
+      body = rewriteMemRegs(body, aliases[rel], aliasesInval[rel], allVar);
+      body = fixpointRewrite(body,
+        [](Expr e){return simplifyBool(simplifyArr(simplifyBV(e)));});
+
       // find alloc-selects, replace them by respective vals
       //                      (need to be an invar)
-      Expr rel = r.srcRelation, memVar = r.srcVars[memMap[rel]];
       vector<ExprMap> aliasCombs;
-      getAliasCombs(body, rel, r.srcVars[allocMap[rel]], aliasCombs);
+      getAliasCombs(body, rel, allVar, aliasCombs);
       if (aliasCombs.empty())
       {
         // no memory accesses, so binding src/dst vars
@@ -711,10 +816,7 @@ namespace ufo
         }
 
         if (allCombEqs.size() == 1) // optimization (modus ponens)
-        {
-          assert (newBodies.size() == 1);
           newBodies = {newBodies[0]->left(), newBodies[0]->right()};
-        }
         else
           newBodies.push_back(distribDisjoin(allCombEqs, m_efac));
 
@@ -723,7 +825,7 @@ namespace ufo
       }
 
       r.body = simplifyBool(simplifyArr(simplifyBV(r.body)));
-      if (printLog >= 8) pprint(r.body, 4);
+      if (printLog >= 5) pprint(r.body, 4);
     }
 
     void rewriteMem()
@@ -743,7 +845,7 @@ namespace ufo
       for (auto & d : ruleManager.decls)
       {
         ExprVector args;
-        args.insert (args.end (), d->args_begin (), d->args_end ()-1);
+        args.insert(args.end(), d->args_begin(), d->args_end()-1);
         for (auto & v : arrVars[d->left()]) args.push_back(typeOf(v.second));
         args.push_back(d->last());
         updDecls.insert(mknary<FDECL>(args));
@@ -751,12 +853,10 @@ namespace ufo
       ruleManager.decls = updDecls;
       for (auto & d : ruleManager.decls)
       {
-        for (auto & v : arrVars[d->left()]){
+        for (auto & v : arrVars[d->left()])
           ruleManager.invVars[d->left()].push_back(v.second);
-        }
-        for (auto & v : arrVarsPr[d->left()]){
+        for (auto & v : arrVarsPr[d->left()])
           ruleManager.invVarsPrime[d->left()].push_back(v.second);
-        }
       }
     }
 

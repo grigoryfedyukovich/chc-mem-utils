@@ -340,7 +340,7 @@ namespace ufo
       return u.isSat(exprs);
     }
 
-    bool assignPrioritiesForLearned()
+    bool assignPrioritiesForLearned(bool useQuant = true)
     {
       bool ret = false;
       for (auto & cand : candidates)
@@ -350,6 +350,8 @@ namespace ufo
           SamplFactory& sf = sfs[cand.first].back();
           for (auto b : cand.second)
           {
+            if (!useQuant && (containsOp<EXISTS>(b) || containsOp<FORALL>(b)))
+              continue;
             b = simplifyArithm(b);
             if (!statsInitialized || containsOp<ARRAY_TY>(b)
                     || containsOp<BOOL_TY>(b) || findNonlin(b))

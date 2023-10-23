@@ -44,6 +44,15 @@ namespace ufo
         res.push_back(e);
   }
 
+  inline static Expr mkVar (Expr name, Expr type)
+  {
+    auto str = lexical_cast<string>(name);
+    if (str.find("\"") != string::npos)
+      str = str.substr(1, str.length() - 2);
+    auto varname = mkTerm<string>(str, name->getFactory());
+    return mk<FAPP>(mk<FDECL>(varname, type));
+  }
+
   struct SetDecoder
   {
     ExprFactory& efac;
@@ -122,8 +131,7 @@ namespace ufo
         if (names[i]->last()->left() == var->last()->left())
           break;
 
-      if (i == names.size())
-        names.push_back(var);
+      if (i == names.size()) return NULL;
 
       return bvnum(mkMPZ(i + 1, efac), ty);
     }
@@ -226,6 +234,8 @@ namespace ufo
       }
 
       h = getVarId(var);
+      if (h == NULL) return mk<TRUE>(efac);
+
       if (fname == "state-r-ok")
         assms.push_back(mk<EQ>(auxP, mk<STORE>(aux, h, nums[2])));
       else if (fname == "state-w-ok")
@@ -250,20 +260,43 @@ namespace ufo
       {
         // TODO: check types if isOpX<BMUL>(allSz)
         Expr h = getVarId(var);
+        if (h == NULL) return mk<TRUE>(efac);
 
         typeSafeInsert(defs, alloc);
         typeSafeInsert(defs, siz);
         typeSafeInsert(defs, off);
         typeSafeInsert(defs, aux);
+        typeSafeInsert(defs, mem);
+
+        Expr ite = bvnum(mkMPZ(names.size(), efac), ty);
+        for (int i = names.size() - 1; i > 0; i--)
+        {
+          Expr num1 = bvnum(mkMPZ(i, efac), ty);
+          ExprVector ands;
+          for (int j = 1; j <= names.size(); j++)
+          {
+            Expr num2 = bvnum(mkMPZ(j, efac), ty);
+            if (num2 == h) continue;
+            ands.push_back(mk<NEQ>(mk<SELECT>(alloc, num2), num1));
+          }
+          ite = mk<ITE>(conjoin(ands, efac), num1, ite);
+        }
+
+        auto nondetMem = mkConst(mkTerm<string> ("nondetMem", efac),
+              typeOf(mem)->last());
+
         return mknary<AND>(ExprVector{
-           mk<EQ>(allocP, mk<STORE>(alloc, h, h)),
-           mk<EQ>(sizP, mk<STORE>(siz, h, allSz)),
+           mk<EQ>(allocP, mk<STORE>(alloc, h, ite)),
+           mk<EQ>(sizP, mk<STORE>(siz, ite, allSz)),
            mk<EQ>(offP, mk<STORE>(off, h, nums[0])),
-           mk<EQ>(auxP, mk<STORE>(aux, h, nums[4]))});
+           mk<EQ>(auxP, mk<STORE>(aux, h, nums[4])),
+           mk<EQ>(memP, mk<STORE>(mem, ite, nondetMem))});
       }
       else
       {
         Expr h = getVarId(var);
+        if (h == NULL) return mk<TRUE>(efac);
+
         if (ptr)
         {
           if (isZero(arg))
@@ -285,6 +318,7 @@ namespace ufo
             typeSafeInsert(defs, alloc);
             auto var = getVarByName(arg->last(), ty);
             Expr k = getVarId(var);
+            if (k == NULL) return mk<TRUE>(efac);
 
             ExprVector ret = { mk<EQ>(allocP,
                 mk<STORE>(mk<STORE>(alloc, k, k), h, k))};
@@ -310,6 +344,7 @@ namespace ufo
 
             Expr srcPtr = arg->right()->right();
             Expr k = getVarId(var);
+            if (k == NULL) return mk<TRUE>(efac);
             Expr h = arg->right()->right();
 
             return mk<AND>(mk<EQ>(allocP, mk<STORE>(alloc, k, arg->right())),
@@ -358,6 +393,7 @@ namespace ufo
       typeSafeInsert(defs, aux);
       typeSafeInsert(defs, off);
       Expr h = getVarId(var);
+      if (h == NULL) return mk<TRUE>(efac);
 
       auto key = mkConst(mkTerm<string> ("k", efac), ty);
       ExprVector assm = {
@@ -392,6 +428,7 @@ namespace ufo
       typeSafeInsert(defs, siz);
       typeSafeInsert(defs, aux);
       Expr h = getVarId(var);
+      if (h == NULL) return mk<TRUE>(efac);
       s = mk<BADD>(s, mk<SELECT>(off, h));
       Expr ss = mk<SELECT>(siz, mk<SELECT>(alloc, h));
 
@@ -440,6 +477,7 @@ namespace ufo
         s = nums[0];
       }
       Expr h = getVarId(var);
+      assert (h != NULL);
       Expr auxAss;
       Expr al = mk<SELECT>(alloc, h);
       Expr rwacc = mk<EQ>(mk<SELECT>(aux, al), nums[4]);
@@ -530,6 +568,7 @@ namespace ufo
 
                 auto h = getVarByName(obj->last(), ty);
                 h = getVarId(h);
+                assert (h != NULL);
 
                 Expr base = l->arg(3)->arg(2);
                 assert(isOpX<SELECT>(base));
@@ -560,6 +599,7 @@ namespace ufo
                 {
                   wr = getVarByName(wr->last(), ty);
                   wr = getVarId(wr);
+                  assert (wr != NULL);
                   wr = mk<SELECT>(mk<SELECT>(mem,
                                   mk<SELECT>(alloc, wr)), nums[0]);
                 }
@@ -568,6 +608,7 @@ namespace ufo
 
                 Expr addNew = mk<TRUE>(efac);
                 Expr k = getVarId(field);
+                assert (k != NULL);
                 typeSafeInsert(defs, mem);
 
                 if (isOpX<SELECT>(objj))
@@ -586,6 +627,7 @@ namespace ufo
                   Expr fmem = getMemField(wr);
                   objj = getVarByName(objj->last(), ty);
                   h = getVarId(objj);
+                  assert (h != NULL);
                   typeSafeInsert(defs, alloc);
                   typeSafeInsert(defs, off);
                   ExprVector eqs = {mk<EQ>(allocP, mk<STORE>(alloc, h, h)),
@@ -606,6 +648,7 @@ namespace ufo
                 else
                 {
                   h = getVarId(objj);
+                  assert (h != NULL);
                   h = mk<SELECT>(alloc, h);
                 }
 
@@ -653,6 +696,7 @@ namespace ufo
               assert(0);
               Expr h = obj;
               if (!isOpX<SELECT>(h)) h = getVarId(h);
+              assert (h != NULL);
               Expr t = mk<SELECT>(off, h);
               Expr b = mk<SELECT>(mem, mk<SELECT>(alloc, h));
               typeSafeInsert(defs, mem);
@@ -688,7 +732,9 @@ namespace ufo
           if (is_bvnum(rhs) && lexical_cast<string>(rhs->left()) == "0")
           {
             // lhs is not a nullpointer
-            return mk<NEQ>(mk<SELECT>(alloc, getVarId(lhs)), nums[0]);
+            auto h = getVarId(lhs);
+            assert(h != NULL);
+            return mk<NEQ>(mk<SELECT>(alloc, h), nums[0]);
           }
         }
         if (find(names.begin(), names.end(), rhs) != names.end())
@@ -696,7 +742,9 @@ namespace ufo
           if (is_bvnum(lhs) && lexical_cast<string>(lhs->left()) == "0")
           {
             // rhs is not a nullpointer
-            return mk<NEQ>(mk<SELECT>(alloc, getVarId(rhs)), nums[0]);
+            auto h = getVarId(lhs);
+            assert(h != NULL);
+            return mk<NEQ>(mk<SELECT>(alloc, h), nums[0]);
           }
         }
       }
@@ -760,6 +808,7 @@ namespace ufo
           if (var != NULL)
           {
             Expr h = getVarId(var);
+            assert(h != NULL);
             typeSafeInsert(defs, mem);
             if (posp != string::npos)
               return mk<SELECT>(mem, mk<SELECT>(alloc, h));
@@ -792,11 +841,14 @@ namespace ufo
               assert(objj->left() == mem);
 
               auto h = getVarId(field);
+              assert(h != NULL);
               return mk<SELECT>(objj, h);
             }
 
             Expr h = getVarId(objj);
+            assert(h != NULL);
             Expr k = getVarId(field);
+            assert(k != NULL);
             typeSafeInsert(defs, mem);
             return simpextract(type, 0,
               mk<SELECT>(mk<SELECT>(mem, mk<SELECT>(alloc, h)), k));
@@ -970,26 +1022,77 @@ namespace ufo
     return dagVisit (rw, exp);
   }
 
-  struct updSeq
+  struct updSeq : public std::unary_function<Expr, VisitAction>
   {
     Expr& res;
     bool& nested;
     updSeq (Expr& _res, bool& _nested) : res(_res), nested(_nested) {}
-    Expr operator() (Expr exp)
+    VisitAction operator() (Expr exp)
     {
-      if (!isOpX<FAPP>(exp)) return exp;
-      auto name = lexical_cast<string>(exp->left()->left());
-      if (name.find("update-state") == string::npos) return exp;
-      if (res == NULL) res = exp;
-      else nested = true;
-      return exp;
+      if (isOpX<FAPP>(exp))
+      {
+        auto name = lexical_cast<string>(exp->left()->left());
+        if (name.find("update-state") != string::npos)
+        {
+          if (res == NULL) res = exp;
+          else nested = true;
+        }
+      }
+      return VisitAction::doKids ();
     }
   };
 
   inline static void findUpd (Expr exp, Expr& res, bool& nested)
   {
-    RW<updSeq> rw(new updSeq(res, nested));
-    dagVisit (rw, exp);
+    updSeq us(res, nested);
+    dagVisit (us, exp);
+  }
+
+  struct nameFinder : public std::unary_function<Expr, VisitAction>
+  {
+    string str;
+    ExprSet& names;
+    nameFinder (string _str, ExprSet& _names) : str(_str), names(_names) {}
+    VisitAction operator() (Expr exp)
+    {
+      if (isOpX<FAPP>(exp))
+      {
+        auto name = lexical_cast<string>(exp->left()->left());
+        if (name.find(str) == 0)
+          names.insert(exp);
+      }
+      return VisitAction::doKids ();
+    }
+  };
+
+  inline static void findNames (Expr exp, string str, ExprSet& names)
+  {
+    nameFinder nf(str, names);
+    dagVisit (nf, exp);
+  }
+
+  inline static void findObjectNames (Expr exp, ExprSet& names)
+  {
+    ExprSet tmp;
+    findNames(exp, "evaluate", tmp);
+    ExprMap repls;
+    for (auto it = tmp.begin(); it != tmp.end(); )
+    {
+      auto a = *it;
+      it = tmp.erase(it);
+      for (auto & b : tmp) assert(!contains(a, b)); // sanity check
+      a = replaceAll(a, repls);
+      auto ty = a->left()->last();
+      ExprSet tmp2;
+      findNames(a, "object-address", tmp2);
+      assert(tmp2.size() <= 1);
+      if (tmp2.size() == 1)
+      {
+        auto var = mkVar((*tmp2.begin())->right(), ty);
+        names.insert(var);
+        repls[a] = var;
+      }
+    }
   }
 }
 

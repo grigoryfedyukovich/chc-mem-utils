@@ -1176,27 +1176,12 @@ namespace ufo
       {
         for (int ind = 0; ind < decls.size(); ind++)
         {
-          Expr d = decls[ind];
-          auto a = allocMap[d];
-          auto o = offMap[d];
-          auto av = ruleManager.invVars[d][a];
-          auto ov = ruleManager.invVars[d][o];
+          Expr decl = decls[ind];
+          auto ov = ruleManager.invVars[decl][offMap[decl]];
           auto z = bvnum(mkMPZ(0, m_efac), typeOf(ov)->last());
-          for (auto & al : aliasesRev[d])
-          {
-            ExprSet tmp;
-
+          for (auto & al : aliasesRev[decl])
             for (auto & a : al.second)
-            {
-              tmp.insert(mk<EQ>(mk<SELECT>(av, al.first), a));
               addToCandidates(ind, mk<EQ>(mk<SELECT>(ov, al.first), z), 105);
-            }
-
-            ExprSet ncands;
-            distribDisjoin(tmp, ncands, m_efac);
-            for (auto & a : ncands)
-              addToCandidates(ind, a, 100);
-          }
         }
       }
       else
